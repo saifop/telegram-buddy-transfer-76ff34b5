@@ -107,12 +107,14 @@ export function ExtractMembersDialog({
     try {
       addLog("info", `جاري استخراج الأعضاء من: ${sourceGroup}`);
 
-      // Call the edge function to extract members
+      // Call the edge function to extract members - use getGroupMembers action
       const { data, error: funcError } = await supabase.functions.invoke("telegram-auth", {
         body: {
-          action: "extractMembers",
-          phone: account.phone,
-          groupUsername: sourceGroup.replace("https://t.me/", "").replace("@", ""),
+          action: "getGroupMembers",
+          sessionString: account.sessionString,
+          groupLink: sourceGroup,
+          apiId: account.apiId,
+          apiHash: account.apiHash,
         },
       });
 
