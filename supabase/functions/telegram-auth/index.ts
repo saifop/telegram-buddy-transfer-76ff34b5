@@ -9,6 +9,28 @@ const corsHeaders = {
     "authorization, x-client-info, apikey, content-type, x-supabase-client-platform, x-supabase-client-platform-version, x-supabase-client-runtime, x-supabase-client-runtime-version",
 };
 
+// Normalize and validate an external MTProto service URL.
+// - trims whitespace
+// - if protocol is missing, prefixes with https://
+// Returns a valid absolute URL string or null.
+const normalizeServiceUrl = (rawUrl: unknown): string | null => {
+  if (typeof rawUrl !== "string") return null;
+  const trimmed = rawUrl.trim();
+  if (!trimmed) return null;
+
+  // Try as-is first
+  try {
+    return new URL(trimmed).toString();
+  } catch {
+    // If missing protocol, try https://
+    try {
+      return new URL(`https://${trimmed}`).toString();
+    } catch {
+      return null;
+    }
+  }
+};
+
 // Input validation helpers
 const validatePhoneNumber = (phone: string): boolean => {
   return /^\+\d{10,15}$/.test(phone);
@@ -65,7 +87,9 @@ Deno.serve(async (req) => {
     const supabase = createClient(supabaseUrl, supabaseServiceKey);
 
     // Check for external MTProto service URL
-    const mtprotoServiceUrl = Deno.env.get("MTPROTO_SERVICE_URL");
+    const mtprotoServiceUrlRaw = Deno.env.get("MTPROTO_SERVICE_URL");
+    const mtprotoServiceUrl = normalizeServiceUrl(mtprotoServiceUrlRaw);
+    const hadInvalidExternalUrl = Boolean(mtprotoServiceUrlRaw && !mtprotoServiceUrl);
 
     // Parse request body
     const { action, ...params } = await req.json();
@@ -73,22 +97,43 @@ Deno.serve(async (req) => {
 
     // If external service is configured, proxy requests to it
     if (mtprotoServiceUrl) {
-      console.log("Using external MTProto service");
+      console.log(`Using external MTProto service: ${mtprotoServiceUrl}`);
       try {
         const response = await fetch(mtprotoServiceUrl, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ action, ...params }),
         });
-        const data = await response.json();
-        return successResponse(data);
+
+        // Try to parse JSON; if service returns non-JSON, surface a clear error
+        let data: unknown = null;
+        try {
+          data = await response.json();
+        } catch {
+          return errorResponse(
+            "Authentication service returned an invalid response",
+            502,
+          );
+        }
+
+        if (!response.ok) {
+          console.error("External service non-OK status:", response.status, data);
+          return errorResponse("Authentication service error", 502);
+        }
+
+        return successResponse(data as object);
       } catch (err) {
         console.error("External service error:", err);
-        return errorResponse("Failed to connect to authentication service", 500);
+        return errorResponse("Failed to connect to authentication service", 502);
       }
     }
 
     // Demo mode: Simulate authentication flow
+    if (hadInvalidExternalUrl) {
+      console.error(
+        "Invalid MTPROTO_SERVICE_URL configured; falling back to demo mode.",
+      );
+    }
     console.log("Running in demo mode - real MTProto requires external service");
 
     switch (action) {
