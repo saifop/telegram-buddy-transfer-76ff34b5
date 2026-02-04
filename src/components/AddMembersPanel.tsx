@@ -40,6 +40,7 @@ interface AddMembersPanelProps {
 
 export interface AddSettings {
   targetGroup: string;
+  sourceGroup: string;
   membersPerAccount: number;
   delayMin: number;
   delayMax: number;
@@ -63,6 +64,7 @@ export function AddMembersPanel({
 }: AddMembersPanelProps) {
   const [settings, setSettings] = useState<AddSettings>({
     targetGroup: "",
+    sourceGroup: "",
     membersPerAccount: 20,
     delayMin: 30,
     delayMax: 60,
@@ -110,6 +112,22 @@ export function AddMembersPanel({
       </CardHeader>
 
       <CardContent className="flex-1 overflow-auto space-y-5">
+        {/* Source Group */}
+        <div className="space-y-2">
+          <Label className="flex items-center gap-2">
+            <Users className="w-4 h-4" />
+            المجموعة المصدر (التي تم استخراج الأعضاء منها)
+          </Label>
+          <Input
+            placeholder="https://t.me/sourcegroup أو @sourcegroup"
+            value={settings.sourceGroup}
+            onChange={(e) => setSettings({ ...settings, sourceGroup: e.target.value })}
+            dir="ltr"
+            className="text-left"
+          />
+          <p className="text-xs text-muted-foreground">مطلوب للعثور على الأعضاء الذين ليس لديهم username</p>
+        </div>
+
         {/* Target Group */}
         <div className="space-y-2">
           <Label className="flex items-center gap-2">
