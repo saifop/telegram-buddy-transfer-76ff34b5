@@ -51,6 +51,12 @@ app.post('/auth', async (req, res) => {
         return await handleVerify2FA(params, res);
       case 'getSession':
         return await handleGetSession(params, res);
+      case 'joinGroup':
+        return await handleJoinGroup(params, res);
+      case 'joinPrivateGroup':
+        return await handleJoinPrivateGroup(params, res);
+      case 'leaveGroup':
+        return await handleLeaveGroup(params, res);
       default:
         return res.status(400).json({ error: 'Invalid action' });
     }
@@ -303,6 +309,170 @@ async function handleGetSession({ sessionId }, res) {
   } catch (error) {
     console.error('GetSession error:', error);
     return res.status(500).json({ error: `خطأ في استخراج الجلسة: ${error.message}` });
+  }
+}
+
+/**
+ * Parse group link to get username or invite hash
+ */
+function parseGroupLink(groupLink) {
+  if (!groupLink) return { type: null, value: null };
+  
+  const trimmed = groupLink.trim();
+  
+  // Handle @username format
+  if (trimmed.startsWith('@')) {
+    return { type: 'username', value: trimmed.substring(1) };
+  }
+  
+  // Handle t.me/username or t.me/joinchat/hash
+  const tmeMatch = trimmed.match(/t\.me\/(?:joinchat\/)?([a-zA-Z0-9_\-+]+)/);
+  if (tmeMatch) {
+    const value = tmeMatch[1];
+    // Check if it's a join link (private group)
+    if (trimmed.includes('joinchat') || trimmed.includes('+')) {
+      return { type: 'hash', value: value.replace('+', '') };
+    }
+    return { type: 'username', value };
+  }
+  
+  // Assume it's a username if nothing else matches
+  return { type: 'username', value: trimmed };
+}
+
+/**
+ * Get or create a client from session string
+ */
+async function getClientFromSession(sessionString, apiId, apiHash) {
+  const stringSession = new StringSession(sessionString);
+  const client = new TelegramClient(stringSession, parseInt(apiId), apiHash, {
+    connectionRetries: 5,
+  });
+  await client.connect();
+  return client;
+}
+
+/**
+ * Join a public group by username
+ */
+async function handleJoinGroup({ sessionString, groupLink, apiId, apiHash }, res) {
+  if (!sessionString || !groupLink) {
+    return res.status(400).json({ error: 'Missing required parameters' });
+  }
+
+  try {
+    const client = await getClientFromSession(sessionString, apiId || 123456, apiHash || 'demo');
+    
+    const { type, value } = parseGroupLink(groupLink);
+    
+    if (!value) {
+      return res.status(400).json({ error: 'Invalid group link' });
+    }
+    
+    console.log(`Joining group: ${value} (type: ${type})`);
+    
+    if (type === 'hash') {
+      // Private group - use import invite
+      await client.invoke(
+        new Api.messages.ImportChatInvite({
+          hash: value,
+        })
+      );
+    } else {
+      // Public group - join by username
+      await client.invoke(
+        new Api.channels.JoinChannel({
+          channel: value,
+        })
+      );
+    }
+    
+    await client.disconnect();
+    
+    return res.json({
+      success: true,
+      message: `Joined group ${value} successfully`,
+    });
+
+  } catch (error) {
+    console.error('JoinGroup error:', error);
+    
+    const errorMessage = error.message || '';
+    if (errorMessage.includes('INVITE_HASH_INVALID')) {
+      return res.status(400).json({ error: 'رابط الدعوة غير صالح' });
+    }
+    if (errorMessage.includes('INVITE_HASH_EXPIRED')) {
+      return res.status(400).json({ error: 'رابط الدعوة منتهي الصلاحية' });
+    }
+    if (errorMessage.includes('USER_ALREADY_PARTICIPANT')) {
+      return res.json({ success: true, message: 'Already a member' });
+    }
+    if (errorMessage.includes('USERS_TOO_MUCH')) {
+      return res.status(400).json({ error: 'المجموعة ممتلئة' });
+    }
+    if (errorMessage.includes('CHANNELS_TOO_MUCH')) {
+      return res.status(400).json({ error: 'وصلت للحد الأقصى من المجموعات' });
+    }
+    if (errorMessage.includes('FLOOD')) {
+      return res.status(429).json({ error: 'تم تجاوز الحد المسموح. انتظر قبل المحاولة مرة أخرى' });
+    }
+    
+    return res.status(500).json({ error: `خطأ في الانضمام: ${errorMessage}` });
+  }
+}
+
+/**
+ * Join a private group by invite link
+ */
+async function handleJoinPrivateGroup(params, res) {
+  // Same as joinGroup, the parsing logic handles both
+  return handleJoinGroup(params, res);
+}
+
+/**
+ * Leave a group
+ */
+async function handleLeaveGroup({ sessionString, groupLink, apiId, apiHash }, res) {
+  if (!sessionString || !groupLink) {
+    return res.status(400).json({ error: 'Missing required parameters' });
+  }
+
+  try {
+    const client = await getClientFromSession(sessionString, apiId || 123456, apiHash || 'demo');
+    
+    const { type, value } = parseGroupLink(groupLink);
+    
+    if (!value) {
+      return res.status(400).json({ error: 'Invalid group link' });
+    }
+    
+    console.log(`Leaving group: ${value}`);
+    
+    await client.invoke(
+      new Api.channels.LeaveChannel({
+        channel: value,
+      })
+    );
+    
+    await client.disconnect();
+    
+    return res.json({
+      success: true,
+      message: `Left group ${value} successfully`,
+    });
+
+  } catch (error) {
+    console.error('LeaveGroup error:', error);
+    
+    const errorMessage = error.message || '';
+    if (errorMessage.includes('USER_NOT_PARTICIPANT')) {
+      return res.json({ success: true, message: 'Not a member' });
+    }
+    if (errorMessage.includes('CHANNEL_INVALID')) {
+      return res.status(400).json({ error: 'المجموعة غير موجودة' });
+    }
+    
+    return res.status(500).json({ error: `خطأ في المغادرة: ${errorMessage}` });
   }
 }
 
