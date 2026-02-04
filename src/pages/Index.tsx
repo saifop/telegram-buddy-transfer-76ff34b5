@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
+import { PasswordGate } from "@/components/PasswordGate";
 import { SidebarProvider } from "@/components/ui/sidebar";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { AppSidebar } from "@/components/AppSidebar";
@@ -35,12 +36,19 @@ export interface LogEntry {
 }
 
 const Index = () => {
+  const [isAuthenticated, setIsAuthenticated] = useState(() => {
+    return localStorage.getItem("app_authenticated") === "true";
+  });
   const [accounts, setAccounts] = useState<TelegramAccount[]>([]);
   const [members, setMembers] = useState<Member[]>([]);
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [operationStatus, setOperationStatus] = useState<"idle" | "running" | "paused">("idle");
   const [progress, setProgress] = useState({ current: 0, total: 0 });
   const [activeTab, setActiveTab] = useState("accounts");
+
+  if (!isAuthenticated) {
+    return <PasswordGate onSuccess={() => setIsAuthenticated(true)} />;
+  }
 
   const addLog = (type: LogEntry["type"], message: string, accountPhone?: string) => {
     const newLog: LogEntry = {
