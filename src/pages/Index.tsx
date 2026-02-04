@@ -18,9 +18,12 @@ export interface TelegramAccount {
   sessionString?: string; // The actual session content for API calls
   apiId?: number;
   apiHash?: string;
-  status: "connected" | "disconnected" | "loading" | "error" | "banned";
+  status: "connected" | "disconnected" | "loading" | "error" | "banned" | "flood";
   isSelected: boolean;
   lastActivity?: string;
+  statusMessage?: string; // Reason for ban/error/flood
+  addedCount?: number; // Number of members added by this account
+  failedCount?: number; // Number of failed additions
 }
 
 export interface LogEntry {
@@ -97,6 +100,45 @@ const Index = () => {
   const handleRemoveAccount = (id: string) => {
     setAccounts((prev) => prev.filter((acc) => acc.id !== id));
     addLog("info", "تم إزالة حساب");
+  };
+
+  const handleUpdateAccountStatus = (
+    accountId: string,
+    status: TelegramAccount["status"],
+    statusMessage?: string
+  ) => {
+    setAccounts((prev) =>
+      prev.map((acc) =>
+        acc.id === accountId
+          ? { ...acc, status, statusMessage, isSelected: status === "banned" || status === "flood" ? false : acc.isSelected }
+          : acc
+      )
+    );
+  };
+
+  const handleIncrementAccountStats = (accountId: string, success: boolean) => {
+    setAccounts((prev) =>
+      prev.map((acc) =>
+        acc.id === accountId
+          ? {
+              ...acc,
+              addedCount: success ? (acc.addedCount || 0) + 1 : acc.addedCount,
+              failedCount: !success ? (acc.failedCount || 0) + 1 : acc.failedCount,
+            }
+          : acc
+      )
+    );
+  };
+
+  const handleResetAccountStatus = (id: string) => {
+    setAccounts((prev) =>
+      prev.map((acc) =>
+        acc.id === id
+          ? { ...acc, status: "connected", statusMessage: undefined }
+          : acc
+      )
+    );
+    addLog("info", "تم إعادة تفعيل الحساب");
   };
 
   // Member handlers
@@ -230,6 +272,7 @@ const Index = () => {
                       onToggleAccount={handleToggleAccount}
                       onSelectAll={handleSelectAllAccounts}
                       onRemoveAccount={handleRemoveAccount}
+                      onResetAccountStatus={handleResetAccountStatus}
                     />
                   </div>
 
@@ -284,6 +327,7 @@ const Index = () => {
                       addLog={addLog}
                       onUpdateProgress={setProgress}
                       onUpdateMemberStatus={handleUpdateMemberStatus}
+                      onUpdateAccountStatus={handleUpdateAccountStatus}
                       onOperationStart={() => setOperationStatus("running")}
                       onOperationEnd={() => setOperationStatus("idle")}
                     />
