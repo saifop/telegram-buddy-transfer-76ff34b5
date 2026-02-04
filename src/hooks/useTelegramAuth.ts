@@ -51,15 +51,18 @@ export function useTelegramAuth(): UseTelegramAuthReturn {
       return false;
     }
 
-    // Validate phone format
-    if (!/^\+\d{10,15}$/.test(phone)) {
+    // Remove spaces from phone number
+    const cleanPhone = phone.replace(/\s/g, '');
+
+    // Validate phone format (after removing spaces)
+    if (!/^\+\d{10,15}$/.test(cleanPhone)) {
       setError('صيغة رقم الهاتف غير صحيحة. استخدم +[رمز الدولة][الرقم]');
       return false;
     }
 
     setError('');
     setIsLoading(true);
-    setPhoneNumber(phone);
+    setPhoneNumber(cleanPhone);
 
     try {
       const { data, error: fnError } = await supabase.functions.invoke('telegram-auth', {
@@ -67,7 +70,7 @@ export function useTelegramAuth(): UseTelegramAuthReturn {
           action: 'sendCode',
           apiId,
           apiHash,
-          phoneNumber: phone,
+          phoneNumber: cleanPhone,
         },
       });
 
