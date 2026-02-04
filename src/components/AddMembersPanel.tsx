@@ -148,7 +148,7 @@ export function AddMembersPanel({
           {!isRunning ? (
             <Button
               onClick={startAdding}
-              className="flex-1 gap-2 bg-green-600 hover:bg-green-700"
+              className="flex-1 gap-2"
               disabled={selectedMembers.length === 0 || activeAccounts.length === 0 || !settings.targetGroup.trim()}
             >
               <Play className="w-4 h-4" />
@@ -329,11 +329,11 @@ export function AddMembersPanel({
         </div>
 
         {/* Warning */}
-        <div className="p-3 rounded-lg bg-yellow-500/10 border border-yellow-500/30 flex items-start gap-2">
-          <AlertTriangle className="w-4 h-4 text-yellow-600 mt-0.5 flex-shrink-0" />
-          <div className="text-xs text-yellow-700">
+        <div className="p-3 rounded-lg bg-accent/40 border flex items-start gap-2">
+          <AlertTriangle className="w-4 h-4 text-foreground/70 mt-0.5 flex-shrink-0" />
+          <div className="text-xs text-foreground/80">
             <p className="font-medium">تنبيه هام:</p>
-            <ul className="mt-1 space-y-0.5 text-yellow-600">
+            <ul className="mt-1 space-y-0.5 text-muted-foreground">
               <li>• الإضافة المفرطة قد تؤدي لحظر الحسابات</li>
               <li>• استخدم تأخيراً مناسباً بين كل عملية</li>
               <li>• لا تتجاوز الحدود اليومية المسموحة</li>

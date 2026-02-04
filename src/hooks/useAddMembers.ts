@@ -109,6 +109,25 @@ export function useAddMembers({
       }
 
       try {
+        // Telegram often cannot invite users by numeric ID unless the account has an entity cached.
+        // In practice, inviting by username is the most reliable.
+        if (!member.username || !member.username.trim()) {
+          const msg = "لا يمكن إضافة هذا العضو لأنه لا يملك username (يوزر).";
+          onUpdateMemberStatus(member.id, "failed", msg);
+          failCount++;
+          addLog("warning", msg, account.phone);
+          // still advance progress + delays below
+          membersAddedByCurrentAccount++;
+          onUpdateProgress({ current: i + 1, total: selectedMembers.length });
+
+          if (i < selectedMembers.length - 1) {
+            const delay = getRandomDelay();
+            addLog("info", `انتظار ${delay} ثانية قبل الإضافة التالية...`);
+            await sleep(delay * 1000);
+          }
+          continue;
+        }
+
         addLog("info", `جاري إضافة: ${member.username || member.firstName || member.oderId}`, account.phone);
 
         const { data, error } = await supabase.functions.invoke("telegram-auth", {
