@@ -27,6 +27,11 @@ interface UseAddMembersProps {
     status: Member["status"],
     errorMessage?: string
   ) => void;
+  onUpdateAccountStatus?: (
+    accountId: string,
+    status: TelegramAccount["status"],
+    statusMessage?: string
+  ) => void;
   onOperationStart: () => void;
   onOperationEnd: () => void;
 }
@@ -38,6 +43,7 @@ export function useAddMembers({
   addLog,
   onUpdateProgress,
   onUpdateMemberStatus,
+  onUpdateAccountStatus,
   onOperationStart,
   onOperationEnd,
 }: UseAddMembersProps) {
@@ -154,16 +160,38 @@ export function useAddMembers({
         } else {
           const errorMsg = data?.error || "خطأ غير معروف";
           
-          // Check for flood wait
-          if (errorMsg.toLowerCase().includes("flood") || errorMsg.includes("FLOOD_WAIT")) {
+          // Check for flood wait - update account status
+          if (errorMsg.toLowerCase().includes("flood") || errorMsg.includes("تم تجاوز الحد")) {
             addLog("warning", `تحذير Flood - انتظار ${settings.cooldownAfterFlood} ثانية`, account.phone);
+            onUpdateAccountStatus?.(account.id, "flood", "تحذير Flood - تم تجاوز الحد المسموح");
             await sleep(settings.cooldownAfterFlood * 1000);
+            // Reset status after cooldown
+            onUpdateAccountStatus?.(account.id, "connected", undefined);
           }
           
-          // Check for ban
-          if (settings.pauseAfterBan && (errorMsg.includes("banned") || errorMsg.includes("BAN"))) {
-            addLog("error", `الحساب محظور: ${account.phone} - إيقاف العملية`);
-            break;
+          // Check for ban - update account status and skip this account
+          if (errorMsg.includes("محظور") || errorMsg.includes("banned") || errorMsg.includes("BAN") || errorMsg.includes("CHAT_WRITE_FORBIDDEN")) {
+            onUpdateAccountStatus?.(account.id, "banned", errorMsg);
+            addLog("error", `الحساب محظور: ${account.phone}`, account.phone);
+            
+            if (settings.pauseAfterBan) {
+              addLog("error", "إيقاف العملية بسبب الحظر");
+              break;
+            } else {
+              // Skip to next account
+              currentAccountIndex = (currentAccountIndex + 1) % activeAccounts.length;
+              membersAddedByCurrentAccount = 0;
+              if (currentAccountIndex === 0) {
+                addLog("error", "جميع الحسابات محظورة - إيقاف العملية");
+                break;
+              }
+              addLog("info", `تبديل للحساب: ${activeAccounts[currentAccountIndex].phone}`);
+            }
+          }
+          
+          // Check for privacy/permission errors
+          if (errorMsg.includes("خصوصية") || errorMsg.includes("صلاحية") || errorMsg.includes("مشرف")) {
+            addLog("warning", `خطأ صلاحيات: ${errorMsg}`, account.phone);
           }
 
           onUpdateMemberStatus(member.id, "failed", errorMsg);

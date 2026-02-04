@@ -34,6 +34,11 @@ interface AddMembersPanelProps {
     status: Member["status"],
     errorMessage?: string
   ) => void;
+  onUpdateAccountStatus?: (
+    accountId: string,
+    status: TelegramAccount["status"],
+    statusMessage?: string
+  ) => void;
   onOperationStart: () => void;
   onOperationEnd: () => void;
 }
@@ -59,6 +64,7 @@ export function AddMembersPanel({
   addLog,
   onUpdateProgress,
   onUpdateMemberStatus,
+  onUpdateAccountStatus,
   onOperationStart,
   onOperationEnd,
 }: AddMembersPanelProps) {
@@ -82,6 +88,7 @@ export function AddMembersPanel({
     addLog,
     onUpdateProgress,
     onUpdateMemberStatus,
+    onUpdateAccountStatus,
     onOperationStart,
     onOperationEnd,
   });
