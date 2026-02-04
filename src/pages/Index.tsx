@@ -338,6 +338,7 @@ const Index = () => {
                       onUpdateAccountStatus={handleUpdateAccountStatus}
                       onOperationStart={() => setOperationStatus("running")}
                       onOperationEnd={() => setOperationStatus("idle")}
+                      onAddMembers={handleImportMembers}
                     />
                   </div>
 

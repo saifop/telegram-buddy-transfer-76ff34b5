@@ -6,6 +6,7 @@ import { Label } from "@/components/ui/label";
 import { Slider } from "@/components/ui/slider";
 import { Switch } from "@/components/ui/switch";
 import { Progress } from "@/components/ui/progress";
+import { Badge } from "@/components/ui/badge";
 import {
   UserPlus,
   Clock,
@@ -17,8 +18,11 @@ import {
   Play,
   Pause,
   Square,
+  Zap,
+  RefreshCw,
 } from "lucide-react";
 import { useAddMembers } from "@/hooks/useAddMembers";
+import { useAutoAddMembers } from "@/hooks/useAutoAddMembers";
 import type { Member } from "./MembersList";
 import type { TelegramAccount, LogEntry } from "@/pages/Index";
 
@@ -41,6 +45,7 @@ interface AddMembersPanelProps {
   ) => void;
   onOperationStart: () => void;
   onOperationEnd: () => void;
+  onAddMembers?: (members: Member[]) => void;
 }
 
 export interface AddSettings {
@@ -67,6 +72,7 @@ export function AddMembersPanel({
   onUpdateAccountStatus,
   onOperationStart,
   onOperationEnd,
+  onAddMembers,
 }: AddMembersPanelProps) {
   const [settings, setSettings] = useState<AddSettings>({
     targetGroup: "",
@@ -81,6 +87,10 @@ export function AddMembersPanel({
     cooldownAfterFlood: 300,
   });
 
+  const [autoMode, setAutoMode] = useState(false);
+  const [autoProgress, setAutoProgress] = useState({ current: 0, total: 0, batch: 0 });
+  const [autoStats, setAutoStats] = useState({ totalAdded: 0, totalFailed: 0, totalSkipped: 0 });
+
   const { isRunning, isPaused, startAdding, pauseAdding, resumeAdding, stopAdding } = useAddMembers({
     members,
     accounts,
@@ -91,6 +101,39 @@ export function AddMembersPanel({
     onUpdateAccountStatus,
     onOperationStart,
     onOperationEnd,
+  });
+
+  const {
+    isRunning: isAutoRunning,
+    isPaused: isAutoPaused,
+    currentBatch,
+    startAutoAdd,
+    pauseAutoAdd,
+    resumeAutoAdd,
+    stopAutoAdd,
+  } = useAutoAddMembers({
+    accounts,
+    settings: {
+      targetGroup: settings.targetGroup,
+      sourceGroup: settings.sourceGroup,
+      membersPerBatch: 50,
+      delayMin: settings.delayMin,
+      delayMax: settings.delayMax,
+      delayBetweenBatches: 30,
+      cooldownAfterFlood: settings.cooldownAfterFlood,
+    },
+    addLog,
+    onUpdateProgress: (p) => setAutoProgress(p),
+    onMembersExtracted: (newMembers) => {
+      onAddMembers?.(newMembers);
+    },
+    onUpdateMemberStatus,
+    onUpdateAccountStatus,
+    onOperationStart,
+    onOperationEnd,
+    onComplete: (stats) => {
+      setAutoStats(stats);
+    },
   });
 
   const selectedMembers = members.filter((m) => m.isSelected && m.status === "pending");
@@ -150,40 +193,89 @@ export function AddMembersPanel({
           />
         </div>
 
+        {/* Auto Mode Toggle */}
+        <div className="flex items-center justify-between p-3 rounded-lg bg-primary/10 border border-primary/20">
+          <div className="flex items-center gap-2">
+            <Zap className="w-4 h-4 text-primary" />
+            <div>
+              <Label className="text-sm font-medium">التشغيل التلقائي المستمر</Label>
+              <p className="text-xs text-muted-foreground">استخراج وإضافة تلقائي حتى اكتمال المجموعة</p>
+            </div>
+          </div>
+          <Switch
+            checked={autoMode}
+            onCheckedChange={setAutoMode}
+            disabled={isRunning || isAutoRunning}
+          />
+        </div>
+
         {/* Control Buttons */}
         <div className="flex gap-2">
-          {!isRunning ? (
-            <Button
-              onClick={startAdding}
-              className="flex-1 gap-2"
-              disabled={selectedMembers.length === 0 || activeAccounts.length === 0 || !settings.targetGroup.trim()}
-            >
-              <Play className="w-4 h-4" />
-              بدء الإضافة ({selectedMembers.length} عضو)
-            </Button>
-          ) : (
-            <>
-              {isPaused ? (
-                <Button onClick={resumeAdding} className="flex-1 gap-2">
-                  <Play className="w-4 h-4" />
-                  استئناف
-                </Button>
-              ) : (
-                <Button onClick={pauseAdding} variant="outline" className="flex-1 gap-2">
-                  <Pause className="w-4 h-4" />
-                  إيقاف مؤقت
-                </Button>
-              )}
-              <Button onClick={stopAdding} variant="destructive" className="gap-2">
-                <Square className="w-4 h-4" />
-                إيقاف
+          {autoMode ? (
+            // Auto mode buttons
+            !isAutoRunning ? (
+              <Button
+                onClick={startAutoAdd}
+                className="flex-1 gap-2 bg-gradient-to-r from-primary to-primary/80"
+                disabled={activeAccounts.length === 0 || !settings.targetGroup.trim() || !settings.sourceGroup.trim()}
+              >
+                <RefreshCw className="w-4 h-4" />
+                بدء التشغيل التلقائي
               </Button>
-            </>
+            ) : (
+              <>
+                {isAutoPaused ? (
+                  <Button onClick={resumeAutoAdd} className="flex-1 gap-2">
+                    <Play className="w-4 h-4" />
+                    استئناف
+                  </Button>
+                ) : (
+                  <Button onClick={pauseAutoAdd} variant="outline" className="flex-1 gap-2">
+                    <Pause className="w-4 h-4" />
+                    إيقاف مؤقت
+                  </Button>
+                )}
+                <Button onClick={stopAutoAdd} variant="destructive" className="gap-2">
+                  <Square className="w-4 h-4" />
+                  إيقاف
+                </Button>
+              </>
+            )
+          ) : (
+            // Manual mode buttons
+            !isRunning ? (
+              <Button
+                onClick={startAdding}
+                className="flex-1 gap-2"
+                disabled={selectedMembers.length === 0 || activeAccounts.length === 0 || !settings.targetGroup.trim()}
+              >
+                <Play className="w-4 h-4" />
+                بدء الإضافة ({selectedMembers.length} عضو)
+              </Button>
+            ) : (
+              <>
+                {isPaused ? (
+                  <Button onClick={resumeAdding} className="flex-1 gap-2">
+                    <Play className="w-4 h-4" />
+                    استئناف
+                  </Button>
+                ) : (
+                  <Button onClick={pauseAdding} variant="outline" className="flex-1 gap-2">
+                    <Pause className="w-4 h-4" />
+                    إيقاف مؤقت
+                  </Button>
+                )}
+                <Button onClick={stopAdding} variant="destructive" className="gap-2">
+                  <Square className="w-4 h-4" />
+                  إيقاف
+                </Button>
+              </>
+            )
           )}
         </div>
 
-        {/* Progress (when running) */}
-        {isRunning && (
+        {/* Progress (when running - manual mode) */}
+        {isRunning && !autoMode && (
           <div className="p-4 rounded-lg bg-accent/50 border space-y-3">
             <div className="flex items-center justify-between text-sm">
               <span className="text-muted-foreground">التقدم:</span>
@@ -194,6 +286,51 @@ export function AddMembersPanel({
             <Progress value={progressPercent} className="h-2" />
             <p className="text-xs text-muted-foreground text-center">
               {isPaused ? "متوقف مؤقتاً" : "جاري الإضافة... يرجى الانتظار"}
+            </p>
+          </div>
+        )}
+
+        {/* Progress (when running - auto mode) */}
+        {isAutoRunning && autoMode && (
+          <div className="p-4 rounded-lg bg-primary/10 border border-primary/20 space-y-3">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <RefreshCw className="w-4 h-4 text-primary animate-spin" />
+                <span className="text-sm font-medium">التشغيل التلقائي</span>
+              </div>
+              <Badge variant="outline" className="bg-primary/10">
+                الدفعة {currentBatch}
+              </Badge>
+            </div>
+            
+            <div className="flex items-center justify-between text-sm">
+              <span className="text-muted-foreground">التقدم في الدفعة:</span>
+              <span className="font-medium">
+                {autoProgress.current} / {autoProgress.total}
+              </span>
+            </div>
+            <Progress 
+              value={autoProgress.total > 0 ? (autoProgress.current / autoProgress.total) * 100 : 0} 
+              className="h-2" 
+            />
+            
+            <div className="grid grid-cols-3 gap-2 text-xs">
+              <div className="text-center p-2 rounded bg-green-500/10">
+                <div className="font-bold text-green-600">{autoStats.totalAdded}</div>
+                <div className="text-muted-foreground">نجاح</div>
+              </div>
+              <div className="text-center p-2 rounded bg-red-500/10">
+                <div className="font-bold text-red-600">{autoStats.totalFailed}</div>
+                <div className="text-muted-foreground">فشل</div>
+              </div>
+              <div className="text-center p-2 rounded bg-yellow-500/10">
+                <div className="font-bold text-yellow-600">{autoStats.totalSkipped}</div>
+                <div className="text-muted-foreground">تخطي</div>
+              </div>
+            </div>
+            
+            <p className="text-xs text-muted-foreground text-center">
+              {isAutoPaused ? "متوقف مؤقتاً" : "يستخرج ويضيف تلقائياً... سيتم إشعارك عند الاكتمال"}
             </p>
           </div>
         )}
