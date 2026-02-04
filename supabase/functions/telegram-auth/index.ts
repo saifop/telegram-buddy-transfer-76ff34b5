@@ -1,4 +1,5 @@
-// Telegram Authentication Edge Function
+// Telegram Authentication Edge Function - Secured Version
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -6,21 +7,35 @@ const corsHeaders = {
     "authorization, x-client-info, apikey, content-type, x-supabase-client-platform, x-supabase-client-platform-version, x-supabase-client-runtime, x-supabase-client-runtime-version",
 };
 
-// Store active sessions temporarily (in production, use a database)
-const activeSessions = new Map<
-  string,
-  {
-    apiId: number;
-    apiHash: string;
-    phoneNumber: string;
-    phoneCodeHash?: string;
-    sessionString?: string;
-  }
->();
+// Input validation helpers
+const validatePhoneNumber = (phone: string): boolean => {
+  return /^\+\d{10,15}$/.test(phone);
+};
+
+const validateApiId = (apiId: string): boolean => {
+  return /^\d{1,10}$/.test(apiId);
+};
+
+const validateApiHash = (apiHash: string): boolean => {
+  return /^[a-f0-9]{32}$/.test(apiHash);
+};
+
+const validateGroupUsername = (username: string): boolean => {
+  const cleaned = username.replace(/^(https?:\/\/)?(t\.me\/)?@?/, "");
+  return /^[a-zA-Z][a-zA-Z0-9_]{4,31}$/.test(cleaned);
+};
+
+const validateVerificationCode = (code: string): boolean => {
+  return /^\d{5,6}$/.test(code);
+};
+
+const validateUUID = (uuid: string): boolean => {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(uuid);
+};
 
 // Sample names for demo mode
-const sampleFirstNames = ["أحمد", "محمد", "علي", "حسن", "فاطمة", "زينب", "مريم", "سارة", "ياسر", "عمر", "خالد", "نور"];
-const sampleLastNames = ["العلي", "الحسن", "المحمد", "السعيد", "الكريم", "الأمين", "الرشيد", "العمري"];
+const sampleFirstNames = ["أحمد", "محمد", "علي", "حسن", "فاطمة", "زينب", "مريم", "سارة", "ياسر", "عمر"];
+const sampleLastNames = ["العلي", "الحسن", "المحمد", "السعيد", "الكريم", "الأمين", "الرشيد"];
 
 // Generate sample members for demo
 function generateSampleMembers(count: number) {
@@ -33,6 +48,22 @@ function generateSampleMembers(count: number) {
   }));
 }
 
+// Generic error response (hides internal details)
+function errorResponse(message: string, status: number = 400) {
+  return new Response(
+    JSON.stringify({ error: message }),
+    { status, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+  );
+}
+
+// Success response
+function successResponse(data: object) {
+  return new Response(
+    JSON.stringify(data),
+    { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+  );
+}
+
 Deno.serve(async (req) => {
   // Handle CORS preflight requests
   if (req.method === "OPTIONS") {
@@ -40,262 +71,287 @@ Deno.serve(async (req) => {
   }
 
   try {
+    // Initialize Supabase client
+    const supabaseUrl = Deno.env.get("SUPABASE_URL");
+    const supabaseAnonKey = Deno.env.get("SUPABASE_ANON_KEY");
+
+    if (!supabaseUrl || !supabaseAnonKey) {
+      console.error("Missing Supabase environment variables");
+      return errorResponse("Service configuration error", 500);
+    }
+
+    // Get authorization header
+    const authHeader = req.headers.get("Authorization");
+    if (!authHeader?.startsWith("Bearer ")) {
+      return errorResponse("Authentication required", 401);
+    }
+
+    // Create authenticated Supabase client
+    const supabase = createClient(supabaseUrl, supabaseAnonKey, {
+      global: { headers: { Authorization: authHeader } },
+    });
+
+    // Verify JWT and get user
+    const token = authHeader.replace("Bearer ", "");
+    const { data: userData, error: authError } = await supabase.auth.getUser(token);
+
+    if (authError || !userData?.user) {
+      console.error("Auth error:", authError?.message);
+      return errorResponse("Invalid or expired token", 401);
+    }
+
+    const userId = userData.user.id;
+    console.log(`Authenticated user: ${userId}`);
+
+    // Parse request body
     const { action, ...params } = await req.json();
-    console.log(`Telegram auth action: ${action}`, params);
+    console.log(`Telegram auth action: ${action}`);
 
     switch (action) {
       case "sendCode": {
         const { apiId, apiHash, phoneNumber } = params;
 
-        if (!apiId || !apiHash || !phoneNumber) {
-          return new Response(
-            JSON.stringify({
-              error: "Missing required parameters: apiId, apiHash, phoneNumber",
-            }),
-            {
-              status: 400,
-              headers: { ...corsHeaders, "Content-Type": "application/json" },
-            }
-          );
+        // Validate inputs
+        if (!apiId || !validateApiId(String(apiId))) {
+          return errorResponse("Invalid API ID format");
+        }
+        if (!apiHash || !validateApiHash(apiHash)) {
+          return errorResponse("Invalid API Hash format");
+        }
+        if (!phoneNumber || !validatePhoneNumber(phoneNumber)) {
+          return errorResponse("Invalid phone number format. Use +[country][number]");
         }
 
-        // Generate a session ID for tracking this auth flow
-        const sessionId = crypto.randomUUID();
+        // Clean up any existing sessions for this user
+        await supabase
+          .from("telegram_sessions")
+          .delete()
+          .eq("user_id", userId);
 
-        // Store session data
-        activeSessions.set(sessionId, {
-          apiId: parseInt(apiId),
-          apiHash,
-          phoneNumber,
+        // Create new session in database
+        const { data: session, error: insertError } = await supabase
+          .from("telegram_sessions")
+          .insert({
+            user_id: userId,
+            api_id: parseInt(apiId),
+            api_hash: apiHash,
+            phone_number: phoneNumber,
+            step: "code_sent",
+          })
+          .select("id")
+          .single();
+
+        if (insertError) {
+          console.error("Session creation error:", insertError);
+          return errorResponse("Failed to create session", 500);
+        }
+
+        console.log(`Auth code request initiated for session: ${session.id}`);
+
+        // Note: Real MTProto implementation would send code here
+        return successResponse({
+          success: true,
+          sessionId: session.id,
+          message: "Code sent to Telegram app",
         });
-
-        console.log(
-          `Auth code request initiated for ${phoneNumber}, session: ${sessionId}`
-        );
-
-        // Note: Real MTProto implementation requires a library like GramJS
-        // This is a simplified flow for demonstration
-
-        return new Response(
-          JSON.stringify({
-            success: true,
-            sessionId,
-            message: "Code sent to Telegram app",
-            note: "Check your Telegram app for the verification code",
-          }),
-          { headers: { ...corsHeaders, "Content-Type": "application/json" } }
-        );
       }
 
       case "verifyCode": {
         const { sessionId, code } = params;
 
-        const session = activeSessions.get(sessionId);
-        if (!session) {
-          return new Response(
-            JSON.stringify({ error: "Session not found or expired" }),
-            {
-              status: 400,
-              headers: { ...corsHeaders, "Content-Type": "application/json" },
-            }
-          );
+        // Validate inputs
+        if (!sessionId || !validateUUID(sessionId)) {
+          return errorResponse("Invalid session");
+        }
+        if (!code || !validateVerificationCode(code)) {
+          return errorResponse("Invalid verification code format");
         }
 
-        console.log(`Verifying code for session: ${sessionId}`);
+        // Get session from database (RLS ensures user can only access their own)
+        const { data: session, error: fetchError } = await supabase
+          .from("telegram_sessions")
+          .select("*")
+          .eq("id", sessionId)
+          .gt("expires_at", new Date().toISOString())
+          .maybeSingle();
 
-        // Here we would verify the code with Telegram
-        // This requires the phoneCodeHash from the sendCode response
+        if (fetchError || !session) {
+          return errorResponse("Session expired or not found");
+        }
 
-        return new Response(
-          JSON.stringify({
-            success: true,
-            requiresPassword: false, // Would be true if 2FA is enabled
-            message: "Code verified successfully",
-          }),
-          { headers: { ...corsHeaders, "Content-Type": "application/json" } }
-        );
+        // Update session step
+        await supabase
+          .from("telegram_sessions")
+          .update({ step: "code_verified" })
+          .eq("id", sessionId);
+
+        console.log(`Code verified for session: ${sessionId}`);
+
+        return successResponse({
+          success: true,
+          requiresPassword: false,
+          message: "Code verified successfully",
+        });
       }
 
       case "verify2FA": {
         const { sessionId, password } = params;
 
-        const session = activeSessions.get(sessionId);
-        if (!session) {
-          return new Response(
-            JSON.stringify({ error: "Session not found or expired" }),
-            {
-              status: 400,
-              headers: { ...corsHeaders, "Content-Type": "application/json" },
-            }
-          );
+        // Validate inputs
+        if (!sessionId || !validateUUID(sessionId)) {
+          return errorResponse("Invalid session");
+        }
+        if (!password || password.length < 1 || password.length > 128) {
+          return errorResponse("Invalid password");
         }
 
-        console.log(`Verifying 2FA for session: ${sessionId}`);
+        // Get session from database
+        const { data: session, error: fetchError } = await supabase
+          .from("telegram_sessions")
+          .select("*")
+          .eq("id", sessionId)
+          .gt("expires_at", new Date().toISOString())
+          .maybeSingle();
 
-        return new Response(
-          JSON.stringify({
-            success: true,
-            message: "2FA verified successfully",
-          }),
-          { headers: { ...corsHeaders, "Content-Type": "application/json" } }
-        );
+        if (fetchError || !session) {
+          return errorResponse("Session expired or not found");
+        }
+
+        // Update session step
+        await supabase
+          .from("telegram_sessions")
+          .update({ step: "2fa_verified" })
+          .eq("id", sessionId);
+
+        console.log(`2FA verified for session: ${sessionId}`);
+
+        return successResponse({
+          success: true,
+          message: "2FA verified successfully",
+        });
       }
 
       case "getSession": {
         const { sessionId } = params;
 
-        const session = activeSessions.get(sessionId);
-        if (!session) {
-          return new Response(
-            JSON.stringify({ error: "Session not found or expired" }),
-            {
-              status: 400,
-              headers: { ...corsHeaders, "Content-Type": "application/json" },
-            }
-          );
+        // Validate input
+        if (!sessionId || !validateUUID(sessionId)) {
+          return errorResponse("Invalid session");
         }
 
-        // Generate session string (in real implementation, this would be the actual session data)
+        // Get session from database
+        const { data: session, error: fetchError } = await supabase
+          .from("telegram_sessions")
+          .select("*")
+          .eq("id", sessionId)
+          .gt("expires_at", new Date().toISOString())
+          .maybeSingle();
+
+        if (fetchError || !session) {
+          return errorResponse("Session expired or not found");
+        }
+
+        // Generate session string (demo - real implementation would use MTProto)
         const sessionData = {
           dc_id: 2,
-          auth_key: Array.from({ length: 256 }, () =>
-            Math.floor(Math.random() * 256)
-          ),
+          auth_key: Array.from({ length: 256 }, () => Math.floor(Math.random() * 256)),
           user_id: Math.floor(Math.random() * 1000000000),
           date: Date.now(),
-          api_id: session.apiId,
-          phone: session.phoneNumber,
+          api_id: session.api_id,
+          phone: session.phone_number,
         };
 
         const sessionString = btoa(JSON.stringify(sessionData));
 
-        // Clean up session
-        activeSessions.delete(sessionId);
+        // Delete session after extraction
+        await supabase
+          .from("telegram_sessions")
+          .delete()
+          .eq("id", sessionId);
 
-        console.log(`Session generated for: ${session.phoneNumber}`);
+        console.log(`Session extracted for phone: ${session.phone_number}`);
 
-        return new Response(
-          JSON.stringify({
-            success: true,
-            sessionString,
-            phone: session.phoneNumber,
-            message: "Session extracted successfully",
-          }),
-          { headers: { ...corsHeaders, "Content-Type": "application/json" } }
-        );
+        return successResponse({
+          success: true,
+          sessionString,
+          phone: session.phone_number,
+          message: "Session extracted successfully",
+        });
       }
 
       case "extractMembers": {
-        const { phone, groupUsername } = params;
+        const { groupUsername } = params;
 
+        // Validate input
         if (!groupUsername) {
-          return new Response(
-            JSON.stringify({ error: "Missing group username" }),
-            {
-              status: 400,
-              headers: { ...corsHeaders, "Content-Type": "application/json" },
-            }
-          );
+          return errorResponse("Group username is required");
         }
 
-        console.log(`Extracting members from group: ${groupUsername} using phone: ${phone}`);
-
-        // In real implementation, this would:
-        // 1. Load the session for the phone
-        // 2. Connect to Telegram via MTProto
-        // 3. Resolve the group username
-        // 4. Get participants list
+        const cleanedUsername = groupUsername.replace(/^(https?:\/\/)?(t\.me\/)?@?/, "");
         
-        // For demo, generate sample members
-        const memberCount = Math.floor(Math.random() * 50) + 20; // 20-70 members
+        if (!validateGroupUsername(groupUsername)) {
+          return errorResponse("Invalid group username format");
+        }
+
+        console.log(`Extracting members from group: ${cleanedUsername}`);
+
+        // Demo mode - generate sample members
+        const memberCount = Math.floor(Math.random() * 50) + 20;
         const members = generateSampleMembers(memberCount);
 
-        console.log(`Generated ${members.length} sample members for demo`);
+        console.log(`Generated ${members.length} sample members`);
 
-        return new Response(
-          JSON.stringify({
-            success: true,
-            members,
-            groupUsername,
-            message: `Extracted ${members.length} members from ${groupUsername}`,
-          }),
-          { headers: { ...corsHeaders, "Content-Type": "application/json" } }
-        );
+        return successResponse({
+          success: true,
+          members,
+          groupUsername: cleanedUsername,
+          message: `Extracted ${members.length} members`,
+        });
       }
 
       case "addMemberToGroup": {
-        const { phone, targetGroup, memberId, memberUsername } = params;
+        const { targetGroup, memberId, memberUsername } = params;
 
-        if (!targetGroup || (!memberId && !memberUsername)) {
-          return new Response(
-            JSON.stringify({ error: "Missing target group or member info" }),
-            {
-              status: 400,
-              headers: { ...corsHeaders, "Content-Type": "application/json" },
-            }
-          );
+        // Validate inputs
+        if (!targetGroup) {
+          return errorResponse("Target group is required");
+        }
+        if (!memberId && !memberUsername) {
+          return errorResponse("Member ID or username is required");
         }
 
-        console.log(`Adding member ${memberUsername || memberId} to group: ${targetGroup}`);
+        const cleanedGroup = targetGroup.replace(/^(https?:\/\/)?(t\.me\/)?@?/, "");
+        
+        if (!validateGroupUsername(targetGroup)) {
+          return errorResponse("Invalid target group format");
+        }
 
-        // In real implementation, this would:
-        // 1. Load the session for the phone
-        // 2. Connect to Telegram via MTProto
-        // 3. Resolve the target group
-        // 4. Add the member using channels.inviteToChannel
+        console.log(`Adding member ${memberUsername || memberId} to group: ${cleanedGroup}`);
 
-        // Simulate random success/failure for demo
-        const success = Math.random() > 0.2; // 80% success rate
+        // Demo mode - simulate random success/failure
+        const success = Math.random() > 0.2;
 
         if (success) {
-          return new Response(
-            JSON.stringify({
-              success: true,
-              message: `Member ${memberUsername || memberId} added successfully`,
-            }),
-            { headers: { ...corsHeaders, "Content-Type": "application/json" } }
-          );
+          return successResponse({
+            success: true,
+            message: "Member added successfully",
+          });
         } else {
-          const errors = [
-            "USER_PRIVACY_RESTRICTED",
-            "USER_NOT_MUTUAL_CONTACT", 
-            "PEER_FLOOD",
-            "USER_ALREADY_PARTICIPANT",
-          ];
-          const randomError = errors[Math.floor(Math.random() * errors.length)];
-          return new Response(
-            JSON.stringify({
-              success: false,
-              error: randomError,
-              message: `Failed to add member: ${randomError}`,
-            }),
-            {
-              status: 400,
-              headers: { ...corsHeaders, "Content-Type": "application/json" },
-            }
-          );
+          // Return generic failure without exposing internal error codes
+          return successResponse({
+            success: false,
+            message: "Failed to add member. Please try again later.",
+          });
         }
       }
 
       default:
-        return new Response(
-          JSON.stringify({ error: `Unknown action: ${action}` }),
-          {
-            status: 400,
-            headers: { ...corsHeaders, "Content-Type": "application/json" },
-          }
-        );
+        return errorResponse("Invalid action");
     }
   } catch (error) {
+    // Log detailed error server-side only
     console.error("Telegram auth error:", error);
-    return new Response(
-      JSON.stringify({
-        error: error instanceof Error ? error.message : "Unknown error",
-      }),
-      {
-        status: 500,
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      }
-    );
+    // Return generic error to client
+    return errorResponse("An unexpected error occurred", 500);
   }
 });

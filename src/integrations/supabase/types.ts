@@ -14,13 +14,48 @@ export type Database = {
   }
   public: {
     Tables: {
-      [_ in never]: never
+      telegram_sessions: {
+        Row: {
+          api_hash: string
+          api_id: number
+          created_at: string | null
+          expires_at: string | null
+          id: string
+          phone_code_hash: string | null
+          phone_number: string
+          step: string | null
+          user_id: string
+        }
+        Insert: {
+          api_hash: string
+          api_id: number
+          created_at?: string | null
+          expires_at?: string | null
+          id?: string
+          phone_code_hash?: string | null
+          phone_number: string
+          step?: string | null
+          user_id: string
+        }
+        Update: {
+          api_hash?: string
+          api_id?: number
+          created_at?: string | null
+          expires_at?: string | null
+          id?: string
+          phone_code_hash?: string | null
+          phone_number?: string
+          step?: string | null
+          user_id?: string
+        }
+        Relationships: []
+      }
     }
     Views: {
       [_ in never]: never
     }
     Functions: {
-      [_ in never]: never
+      cleanup_expired_telegram_sessions: { Args: never; Returns: undefined }
     }
     Enums: {
       [_ in never]: never
