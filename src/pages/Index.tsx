@@ -15,6 +15,9 @@ export interface TelegramAccount {
   id: string;
   phone: string;
   sessionFile: string;
+  sessionString?: string; // The actual session content for API calls
+  apiId?: number;
+  apiHash?: string;
   status: "connected" | "disconnected" | "loading" | "error" | "banned";
   isSelected: boolean;
   lastActivity?: string;
@@ -64,11 +67,16 @@ const Index = () => {
     phone: string;
     sessionFile: string;
     sessionContent: string;
+    apiId?: number;
+    apiHash?: string;
   }) => {
     const newAccount: TelegramAccount = {
       id: crypto.randomUUID(),
       phone: sessionData.phone,
       sessionFile: sessionData.sessionFile,
+      sessionString: sessionData.sessionContent,
+      apiId: sessionData.apiId,
+      apiHash: sessionData.apiHash,
       status: "connected",
       isSelected: true,
     };
@@ -228,9 +236,12 @@ const Index = () => {
                   {/* Center Panel - Operations */}
                   <div className="lg:col-span-1 overflow-hidden">
                     <OperationsPanel
+                      accounts={accounts}
                       selectedAccounts={accounts.filter((a) => a.isSelected).length}
                       isRunning={operationStatus === "running"}
                       addLog={addLog}
+                      onOperationStart={() => setOperationStatus("running")}
+                      onOperationEnd={() => setOperationStatus("idle")}
                     />
                   </div>
 

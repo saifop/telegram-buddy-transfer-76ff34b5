@@ -10,6 +10,8 @@ interface SessionManagerProps {
     phone: string;
     sessionFile: string;
     sessionContent: string;
+    apiId?: number;
+    apiHash?: string;
   }) => void;
 }
 
@@ -37,6 +39,8 @@ export function SessionManager({ onLoadSessions, onSessionExtracted }: SessionMa
     phone: string;
     sessionFile: string;
     sessionContent: string;
+    apiId?: number;
+    apiHash?: string;
   }) => {
     if (onSessionExtracted) {
       onSessionExtracted(sessionData);

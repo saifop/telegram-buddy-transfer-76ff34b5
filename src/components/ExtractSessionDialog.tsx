@@ -29,6 +29,8 @@ interface ExtractSessionDialogProps {
     phone: string;
     sessionFile: string;
     sessionContent: string;
+    apiId?: number;
+    apiHash?: string;
   }) => void;
 }
 
@@ -102,8 +104,12 @@ export function ExtractSessionDialog({ onSessionExtracted }: ExtractSessionDialo
     a.click();
     URL.revokeObjectURL(url);
 
-    // Notify parent component
-    onSessionExtracted(sessionData);
+    // Notify parent component with API credentials
+    onSessionExtracted({
+      ...sessionData,
+      apiId: apiId ? parseInt(apiId) : undefined,
+      apiHash: apiHash || undefined,
+    });
 
     handleOpenChange(false);
   };
