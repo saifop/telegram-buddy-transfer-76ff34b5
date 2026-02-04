@@ -22,6 +22,7 @@ import {
   AlertCircle,
   Shield,
 } from "lucide-react";
+import { useTelegramAuth, AuthStep } from "@/hooks/useTelegramAuth";
 
 interface ExtractSessionDialogProps {
   onSessionExtracted: (sessionData: {
@@ -31,14 +32,9 @@ interface ExtractSessionDialogProps {
   }) => void;
 }
 
-type Step = "credentials" | "phone" | "code" | "password" | "success";
-
 export function ExtractSessionDialog({ onSessionExtracted }: ExtractSessionDialogProps) {
   const [open, setOpen] = useState(false);
-  const [step, setStep] = useState<Step>("credentials");
-  const [isLoading, setIsLoading] = useState(false);
-  const [error, setError] = useState("");
-
+  
   // Form data
   const [apiId, setApiId] = useState("");
   const [apiHash, setApiHash] = useState("");
@@ -46,19 +42,25 @@ export function ExtractSessionDialog({ onSessionExtracted }: ExtractSessionDialo
   const [verificationCode, setVerificationCode] = useState("");
   const [twoFactorPassword, setTwoFactorPassword] = useState("");
 
-  // Session result
-  const [sessionData, setSessionData] = useState<string | null>(null);
+  // Use the Telegram auth hook
+  const {
+    step,
+    isLoading,
+    error,
+    sessionData,
+    sendCode,
+    verifyCode,
+    verify2FA,
+    reset,
+  } = useTelegramAuth();
 
   const resetForm = () => {
-    setStep("credentials");
-    setIsLoading(false);
-    setError("");
+    reset();
     setApiId("");
     setApiHash("");
     setPhoneNumber("");
     setVerificationCode("");
     setTwoFactorPassword("");
-    setSessionData(null);
   };
 
   const handleOpenChange = (newOpen: boolean) => {
@@ -68,113 +70,61 @@ export function ExtractSessionDialog({ onSessionExtracted }: ExtractSessionDialo
     }
   };
 
-  const simulateApiCall = (delay: number = 1500) => {
-    return new Promise((resolve) => setTimeout(resolve, delay));
-  };
-
   const handleSubmitCredentials = async () => {
+    // Move to phone step after validating credentials format
     if (!apiId || !apiHash) {
-      setError("يرجى إدخال API ID و API Hash");
-      return;
+      return; // Error will be shown by the hook
     }
-    setError("");
-    setIsLoading(true);
-    await simulateApiCall(1000);
-    setIsLoading(false);
-    setStep("phone");
+    // Just advance to phone step - actual API call happens when sending code
+    const success = await sendCode(apiId, apiHash, phoneNumber || "+0");
+    // If no phone yet, we need to get it first
+    if (!phoneNumber) {
+      // We'll call sendCode again after getting phone number
+      resetForm();
+      setApiId(apiId);
+      setApiHash(apiHash);
+    }
   };
 
   const handleSubmitPhone = async () => {
-    if (!phoneNumber) {
-      setError("يرجى إدخال رقم الهاتف");
-      return;
-    }
-    setError("");
-    setIsLoading(true);
-    await simulateApiCall(1500);
-    setIsLoading(false);
-    setStep("code");
+    await sendCode(apiId, apiHash, phoneNumber);
   };
 
   const handleSubmitCode = async () => {
-    if (!verificationCode || verificationCode.length < 5) {
-      setError("يرجى إدخال رمز التحقق الصحيح");
-      return;
-    }
-    setError("");
-    setIsLoading(true);
-    await simulateApiCall(2000);
-    setIsLoading(false);
-
-    // Simulate 2FA requirement (30% chance)
-    if (Math.random() < 0.3) {
-      setStep("password");
-    } else {
-      generateSession();
-    }
+    await verifyCode(verificationCode);
   };
 
   const handleSubmit2FA = async () => {
-    if (!twoFactorPassword) {
-      setError("يرجى إدخال كلمة مرور التحقق بخطوتين");
-      return;
-    }
-    setError("");
-    setIsLoading(true);
-    await simulateApiCall(1500);
-    setIsLoading(false);
-    generateSession();
-  };
-
-  const generateSession = () => {
-    // Generate mock session data
-    const mockSessionContent = btoa(
-      JSON.stringify({
-        dc_id: 2,
-        auth_key: Array.from({ length: 256 }, () =>
-          Math.floor(Math.random() * 256)
-        ),
-        user_id: Math.floor(Math.random() * 1000000000),
-        date: Date.now(),
-        api_id: apiId,
-      })
-    );
-    setSessionData(mockSessionContent);
-    setStep("success");
+    await verify2FA(twoFactorPassword);
   };
 
   const handleSaveSession = () => {
     if (!sessionData) return;
 
-    const fileName = `${phoneNumber.replace(/[^0-9]/g, "")}.session`;
-    const blob = new Blob([sessionData], { type: "application/octet-stream" });
+    const blob = new Blob([sessionData.sessionContent], { type: "application/octet-stream" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = fileName;
+    a.download = sessionData.sessionFile;
     a.click();
     URL.revokeObjectURL(url);
 
     // Notify parent component
-    onSessionExtracted({
-      phone: phoneNumber,
-      sessionFile: fileName,
-      sessionContent: sessionData,
-    });
+    onSessionExtracted(sessionData);
 
     handleOpenChange(false);
   };
 
-  const getStepProgress = () => {
-    switch (step) {
+  const getStepProgress = (currentStep: AuthStep) => {
+    switch (currentStep) {
       case "credentials":
-        return 20;
+        return 25;
       case "phone":
-        return 40;
+        return 50;
       case "code":
-        return 60;
+        return 75;
       case "password":
-        return 80;
+        return 90;
       case "success":
         return 100;
       default:
@@ -182,8 +132,8 @@ export function ExtractSessionDialog({ onSessionExtracted }: ExtractSessionDialo
     }
   };
 
-  const getStepLabel = () => {
-    switch (step) {
+  const getStepLabel = (currentStep: AuthStep) => {
+    switch (currentStep) {
       case "credentials":
         return "بيانات API";
       case "phone":
@@ -198,6 +148,9 @@ export function ExtractSessionDialog({ onSessionExtracted }: ExtractSessionDialo
         return "";
     }
   };
+
+  // Determine which step to show in UI
+  const uiStep = step === "credentials" && apiId && apiHash ? "phone" : step;
 
   return (
     <Dialog open={open} onOpenChange={handleOpenChange}>
@@ -223,9 +176,9 @@ export function ExtractSessionDialog({ onSessionExtracted }: ExtractSessionDialo
         <div className="space-y-2">
           <div className="flex items-center justify-between text-sm">
             <span className="text-muted-foreground">التقدم</span>
-            <Badge variant="outline">{getStepLabel()}</Badge>
+            <Badge variant="outline">{getStepLabel(step)}</Badge>
           </div>
-          <Progress value={getStepProgress()} className="h-2" />
+          <Progress value={getStepProgress(step)} className="h-2" />
         </div>
 
         {/* Error Message */}
@@ -399,7 +352,7 @@ export function ExtractSessionDialog({ onSessionExtracted }: ExtractSessionDialo
         )}
 
         {/* Step: Success */}
-        {step === "success" && (
+        {step === "success" && sessionData && (
           <div className="space-y-4">
             <div className="text-center py-4">
               <div className="w-16 h-16 rounded-full bg-green-500/20 flex items-center justify-center mx-auto mb-4">
@@ -407,7 +360,7 @@ export function ExtractSessionDialog({ onSessionExtracted }: ExtractSessionDialo
               </div>
               <h3 className="font-semibold text-lg">تم استخراج الجلسة بنجاح!</h3>
               <p className="text-sm text-muted-foreground mt-1">
-                رقم الهاتف: <span dir="ltr">{phoneNumber}</span>
+                رقم الهاتف: <span dir="ltr">{sessionData.phone}</span>
               </p>
             </div>
 
