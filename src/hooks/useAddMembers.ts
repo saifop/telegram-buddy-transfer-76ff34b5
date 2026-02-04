@@ -77,6 +77,44 @@ export function useAddMembers({
     return settings.cooldownAfterFlood;
   };
 
+  // Join a group with an account
+  const joinGroupWithAccount = async (
+    account: TelegramAccount,
+    groupLink: string
+  ): Promise<{ success: boolean; error?: string; alreadyJoined?: boolean }> => {
+    try {
+      const { data, error } = await supabase.functions.invoke("telegram-auth", {
+        body: {
+          action: "joinGroup",
+          sessionString: account.sessionString,
+          groupLink: groupLink,
+          apiId: account.apiId,
+          apiHash: account.apiHash,
+        },
+      });
+
+      if (error) {
+        return { success: false, error: error.message || "فشل في الاتصال بالخادم" };
+      }
+
+      if (data?.success) {
+        return { success: true, alreadyJoined: data.alreadyJoined };
+      }
+
+      const errorMsg = data?.error || "خطأ غير معروف";
+      
+      // Check if already a member
+      if (errorMsg.includes("USER_ALREADY_PARTICIPANT") || errorMsg.includes("موجود مسبقاً")) {
+        return { success: true, alreadyJoined: true };
+      }
+
+      return { success: false, error: errorMsg };
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : "خطأ غير متوقع";
+      return { success: false, error: errorMessage };
+    }
+  };
+
   // Add a single member using a specific account
   const addMemberWithAccount = async (
     member: Member,
@@ -236,6 +274,50 @@ export function useAddMembers({
     pauseRef.current = false;
     onOperationStart();
 
+    // Step 1: Join groups with all accounts first
+    addLog("info", `جاري انضمام ${activeAccounts.length} حساب للمجموعات...`);
+    
+    const groupsToJoin: string[] = [];
+    if (settings.sourceGroup.trim()) {
+      groupsToJoin.push(settings.sourceGroup.trim());
+    }
+    groupsToJoin.push(settings.targetGroup.trim());
+    
+    for (const account of activeAccounts) {
+      if (abortRef.current) break;
+      
+      for (const groupLink of groupsToJoin) {
+        if (abortRef.current) break;
+        
+        const groupName = groupLink.includes("/") ? groupLink.split("/").pop() : groupLink;
+        addLog("info", `${account.phone} - جاري الانضمام إلى ${groupName}...`);
+        
+        const result = await joinGroupWithAccount(account, groupLink);
+        
+        if (result.success) {
+          if (result.alreadyJoined) {
+            addLog("info", `${account.phone} - موجود مسبقاً في ${groupName}`);
+          } else {
+            addLog("success", `${account.phone} - تم الانضمام إلى ${groupName}`);
+          }
+        } else {
+          addLog("warning", `${account.phone} - فشل الانضمام إلى ${groupName}: ${result.error}`);
+        }
+        
+        // Small delay between join attempts
+        await sleep(2000);
+      }
+    }
+    
+    if (abortRef.current) {
+      setIsRunning(false);
+      setIsPaused(false);
+      onOperationEnd();
+      addLog("warning", "تم إلغاء العملية");
+      return;
+    }
+
+    // Step 2: Start adding members
     addLog("info", `بدء إضافة ${selectedMembers.length} عضو بواسطة ${activeAccounts.length} حساب بالتوازي`);
     onUpdateProgress({ current: 0, total: selectedMembers.length });
 
