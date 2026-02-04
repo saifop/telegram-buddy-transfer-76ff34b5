@@ -2,12 +2,18 @@ import { useRef } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { FolderOpen, Upload, FileText } from "lucide-react";
+import { ExtractSessionDialog } from "./ExtractSessionDialog";
 
 interface SessionManagerProps {
   onLoadSessions: (files: File[]) => void;
+  onSessionExtracted?: (sessionData: {
+    phone: string;
+    sessionFile: string;
+    sessionContent: string;
+  }) => void;
 }
 
-export function SessionManager({ onLoadSessions }: SessionManagerProps) {
+export function SessionManager({ onLoadSessions, onSessionExtracted }: SessionManagerProps) {
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -27,15 +33,31 @@ export function SessionManager({ onLoadSessions }: SessionManagerProps) {
     }
   };
 
+  const handleSessionExtracted = (sessionData: {
+    phone: string;
+    sessionFile: string;
+    sessionContent: string;
+  }) => {
+    if (onSessionExtracted) {
+      onSessionExtracted(sessionData);
+    }
+  };
+
   return (
     <Card className="flex-shrink-0">
       <CardHeader className="pb-3">
-        <CardTitle className="text-base flex items-center gap-2">
-          <FolderOpen className="w-4 h-4" />
-          تحميل الجلسات
-        </CardTitle>
+        <div className="flex items-center justify-between">
+          <CardTitle className="text-base flex items-center gap-2">
+            <FolderOpen className="w-4 h-4" />
+            إدارة الجلسات
+          </CardTitle>
+        </div>
       </CardHeader>
-      <CardContent>
+      <CardContent className="space-y-4">
+        {/* Extract New Session Button */}
+        <ExtractSessionDialog onSessionExtracted={handleSessionExtracted} />
+
+        {/* Drag & Drop Area */}
         <div
           onDrop={handleDrop}
           onDragOver={(e) => e.preventDefault()}
@@ -58,7 +80,7 @@ export function SessionManager({ onLoadSessions }: SessionManagerProps) {
           onChange={handleFileSelect}
         />
 
-        <div className="mt-4 flex gap-2">
+        <div className="flex gap-2">
           <Button
             variant="outline"
             size="sm"
