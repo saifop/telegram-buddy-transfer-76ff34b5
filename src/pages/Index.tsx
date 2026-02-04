@@ -1,8 +1,6 @@
-import { useState, useEffect } from "react";
-import { useNavigate } from "react-router-dom";
+import { useState } from "react";
 import { SidebarProvider } from "@/components/ui/sidebar";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Button } from "@/components/ui/button";
 import { AppSidebar } from "@/components/AppSidebar";
 import { SessionManager } from "@/components/SessionManager";
 import { AccountsList } from "@/components/AccountsList";
@@ -12,8 +10,6 @@ import { ControlBar } from "@/components/ControlBar";
 import { MembersList, type Member } from "@/components/MembersList";
 import { AddMembersPanel } from "@/components/AddMembersPanel";
 import { ExtractMembersDialog } from "@/components/ExtractMembersDialog";
-import { useAuth } from "@/hooks/useAuth";
-import { LogOut, Loader2 } from "lucide-react";
 
 export interface TelegramAccount {
   id: string;
@@ -33,22 +29,12 @@ export interface LogEntry {
 }
 
 const Index = () => {
-  const navigate = useNavigate();
-  const { user, isLoading: authLoading, signOut } = useAuth();
-  
   const [accounts, setAccounts] = useState<TelegramAccount[]>([]);
   const [members, setMembers] = useState<Member[]>([]);
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [operationStatus, setOperationStatus] = useState<"idle" | "running" | "paused">("idle");
   const [progress, setProgress] = useState({ current: 0, total: 0 });
   const [activeTab, setActiveTab] = useState("accounts");
-
-  // Redirect to auth if not logged in
-  useEffect(() => {
-    if (!authLoading && !user) {
-      navigate("/auth", { replace: true });
-    }
-  }, [user, authLoading, navigate]);
 
   const addLog = (type: LogEntry["type"], message: string, accountPhone?: string) => {
     const newLog: LogEntry = {
@@ -186,20 +172,6 @@ const Index = () => {
     addLog("info", "تم إيقاف العملية");
   };
 
-  // Show loading while checking auth
-  if (authLoading) {
-    return (
-      <div className="min-h-screen flex items-center justify-center bg-background">
-        <Loader2 className="w-8 h-8 animate-spin text-primary" />
-      </div>
-    );
-  }
-
-  // Don't render if not authenticated
-  if (!user) {
-    return null;
-  }
-
   return (
     <SidebarProvider>
       <div className="min-h-screen flex w-full bg-background" dir="rtl">
@@ -216,10 +188,6 @@ const Index = () => {
               <span className="text-sm text-muted-foreground">
                 الأعضاء: {members.filter((m) => m.isSelected).length}/{members.length}
               </span>
-              <Button variant="ghost" size="sm" onClick={signOut} className="gap-2">
-                <LogOut className="w-4 h-4" />
-                خروج
-              </Button>
             </div>
           </header>
 
