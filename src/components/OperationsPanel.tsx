@@ -3,27 +3,19 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Slider } from "@/components/ui/slider";
 import { Progress } from "@/components/ui/progress";
+import { Separator } from "@/components/ui/separator";
 import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-  DialogTrigger,
-} from "@/components/ui/dialog";
-import { Settings, UserPlus, LogIn, LogOut, Clock, Users, Copy, ArrowLeftRight, Play, Loader2 } from "lucide-react";
+  LogIn,
+  Users,
+  UserPlus,
+  Loader2,
+  CheckCircle,
+  ArrowDown,
+  Settings,
+} from "lucide-react";
 import type { TelegramAccount, LogEntry } from "@/pages/Index";
+import type { Member } from "./MembersList";
 import { supabase } from "@/integrations/supabase/client";
 import { toast } from "sonner";
 
@@ -34,13 +26,10 @@ interface OperationsPanelProps {
   addLog: (type: LogEntry["type"], message: string, accountPhone?: string) => void;
   onOperationStart?: () => void;
   onOperationEnd?: () => void;
+  onMembersExtracted?: (members: Member[]) => void;
 }
 
-interface GroupOperationResult {
-  phone: string;
-  success: boolean;
-  error?: string;
-}
+type WorkflowStep = "idle" | "joining" | "joined" | "extracting" | "extracted" | "adding" | "complete";
 
 export function OperationsPanel({
   accounts,
@@ -49,474 +38,406 @@ export function OperationsPanel({
   addLog,
   onOperationStart,
   onOperationEnd,
+  onMembersExtracted,
 }: OperationsPanelProps) {
-  const [operationType, setOperationType] = useState("join-public");
-  const [groupLink, setGroupLink] = useState("");
+  const [sourceGroup, setSourceGroup] = useState("");
   const [targetGroup, setTargetGroup] = useState("");
-  const [delayMin, setDelayMin] = useState(30);
-  const [delayMax, setDelayMax] = useState(60);
-  const [accountsPerBatch, setAccountsPerBatch] = useState(5);
-  
+  const [workflowStep, setWorkflowStep] = useState<WorkflowStep>("idle");
   const [isExecuting, setIsExecuting] = useState(false);
-  const [operationProgress, setOperationProgress] = useState({ current: 0, total: 0 });
-  const [operationResults, setOperationResults] = useState<GroupOperationResult[]>([]);
-  const [showTransferDialog, setShowTransferDialog] = useState(false);
-  const [transferTargetGroup, setTransferTargetGroup] = useState("");
+  const [progress, setProgress] = useState({ current: 0, total: 0 });
+  const [extractedMembers, setExtractedMembers] = useState<Member[]>([]);
+  const [delaySeconds, setDelaySeconds] = useState(30);
 
   const selectedAccountsList = accounts.filter((a) => a.isSelected);
 
   const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-  const getRandomDelay = () => {
-    return Math.floor(Math.random() * (delayMax - delayMin + 1) + delayMin) * 1000;
-  };
+  // Step 1: Join accounts to source group
+  const handleJoinGroup = async () => {
+    if (!sourceGroup.trim()) {
+      toast.error("يرجى إدخال رابط المجموعة المصدر");
+      return;
+    }
+    if (selectedAccountsList.length === 0) {
+      toast.error("يرجى تحديد حساب واحد على الأقل");
+      return;
+    }
 
-  const executeGroupOperation = async (
-    account: TelegramAccount,
-    operation: string,
-    group: string
-  ): Promise<GroupOperationResult> => {
-    try {
-      // Check if account has session string
-      if (!account.sessionString) {
-        return { 
-          phone: account.phone, 
-          success: false, 
-          error: "الحساب غير متصل - يرجى استخراج الجلسة أولاً" 
-        };
+    setIsExecuting(true);
+    setWorkflowStep("joining");
+    setProgress({ current: 0, total: selectedAccountsList.length });
+    onOperationStart?.();
+
+    addLog("info", `بدء انضمام ${selectedAccountsList.length} حساب للمجموعة...`);
+
+    let successCount = 0;
+    for (let i = 0; i < selectedAccountsList.length; i++) {
+      const account = selectedAccountsList[i];
+      
+      try {
+        if (!account.sessionString) {
+          addLog("warning", `الحساب ${account.phone} غير متصل`, account.phone);
+          continue;
+        }
+
+        const { data, error } = await supabase.functions.invoke("telegram-auth", {
+          body: {
+            action: "joinGroup",
+            sessionString: account.sessionString,
+            groupLink: sourceGroup,
+            apiId: account.apiId,
+            apiHash: account.apiHash,
+          },
+        });
+
+        if (error || data?.error) {
+          addLog("error", `فشل انضمام ${account.phone}: ${error?.message || data?.error}`, account.phone);
+        } else {
+          successCount++;
+          addLog("success", `تم انضمام ${account.phone} بنجاح`, account.phone);
+        }
+      } catch (err) {
+        addLog("error", `خطأ في الانضمام: ${account.phone}`, account.phone);
       }
 
+      setProgress({ current: i + 1, total: selectedAccountsList.length });
+
+      if (i < selectedAccountsList.length - 1) {
+        await sleep(delaySeconds * 1000);
+      }
+    }
+
+    addLog("success", `اكتمل الانضمام: ${successCount}/${selectedAccountsList.length} نجاح`);
+    toast.success(`تم انضمام ${successCount} حساب بنجاح`);
+    
+    setWorkflowStep("joined");
+    setIsExecuting(false);
+    onOperationEnd?.();
+  };
+
+  // Step 2: Extract members from the group
+  const handleExtractMembers = async () => {
+    if (selectedAccountsList.length === 0) {
+      toast.error("يرجى تحديد حساب واحد على الأقل");
+      return;
+    }
+
+    const account = selectedAccountsList[0]; // Use first selected account
+    if (!account.sessionString) {
+      toast.error("الحساب غير متصل");
+      return;
+    }
+
+    setIsExecuting(true);
+    setWorkflowStep("extracting");
+    addLog("info", `جاري استخراج الأعضاء من المجموعة...`);
+
+    try {
       const { data, error } = await supabase.functions.invoke("telegram-auth", {
         body: {
-          action: operation,
+          action: "getGroupMembers",
           sessionString: account.sessionString,
-          groupLink: group,
+          groupLink: sourceGroup,
           apiId: account.apiId,
           apiHash: account.apiHash,
-          phone: account.phone,
         },
       });
 
-      if (error) {
-        throw new Error(error.message);
+      if (error || data?.error) {
+        throw new Error(error?.message || data?.error);
       }
 
-      if (data?.error) {
-        throw new Error(data.error);
-      }
+      const members: Member[] = (data?.members || []).map((m: any, index: number) => ({
+        id: crypto.randomUUID(),
+        oderId: m.id?.toString() || index.toString(),
+        username: m.username || "",
+        firstName: m.firstName || m.first_name || "",
+        lastName: m.lastName || m.last_name || "",
+        status: "pending" as const,
+        isSelected: true,
+      }));
 
-      return { phone: account.phone, success: true };
+      setExtractedMembers(members);
+      onMembersExtracted?.(members);
+      
+      addLog("success", `تم استخراج ${members.length} عضو من المجموعة`);
+      toast.success(`تم استخراج ${members.length} عضو`);
+      
+      setWorkflowStep("extracted");
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : "خطأ غير معروف";
-      return { phone: account.phone, success: false, error: errorMessage };
+      addLog("error", `فشل استخراج الأعضاء: ${errorMessage}`);
+      toast.error(`فشل الاستخراج: ${errorMessage}`);
+      setWorkflowStep("joined");
     }
-  };
-
-  const handleStartOperation = async () => {
-    if (!groupLink.trim()) {
-      toast.error("يرجى إدخال رابط المجموعة");
-      return;
-    }
-
-    if (selectedAccountsList.length === 0) {
-      toast.error("يرجى تحديد حساب واحد على الأقل");
-      return;
-    }
-
-    setIsExecuting(true);
-    setOperationResults([]);
-    setOperationProgress({ current: 0, total: selectedAccountsList.length });
-    onOperationStart?.();
-
-    const actionMap: Record<string, string> = {
-      "join-public": "joinGroup",
-      "join-private": "joinPrivateGroup",
-      "leave-public": "leaveGroup",
-      "leave-private": "leaveGroup",
-    };
-
-    const action = actionMap[operationType] || "joinGroup";
-    const operationName = operationType.includes("join") ? "الانضمام" : "المغادرة";
-    const results: GroupOperationResult[] = [];
-
-    addLog("info", `بدء عملية ${operationName} لـ ${selectedAccountsList.length} حساب...`);
-
-    for (let i = 0; i < selectedAccountsList.length; i++) {
-      const account = selectedAccountsList[i];
-      
-      addLog("info", `جاري ${operationName} للحساب: ${account.phone}`, account.phone);
-      
-      const result = await executeGroupOperation(account, action, groupLink);
-      results.push(result);
-
-      if (result.success) {
-        addLog("success", `تم ${operationName} بنجاح: ${account.phone}`, account.phone);
-      } else {
-        addLog("error", `فشل ${operationName}: ${account.phone} - ${result.error}`, account.phone);
-      }
-
-      setOperationProgress({ current: i + 1, total: selectedAccountsList.length });
-      setOperationResults([...results]);
-
-      // Add delay between operations (except for last one)
-      if (i < selectedAccountsList.length - 1) {
-        const delay = getRandomDelay();
-        addLog("info", `انتظار ${Math.round(delay / 1000)} ثانية...`);
-        await sleep(delay);
-      }
-    }
-
-    const successCount = results.filter((r) => r.success).length;
-    const failCount = results.filter((r) => !r.success).length;
-
-    addLog(
-      successCount > 0 ? "success" : "error",
-      `اكتملت العملية: ${successCount} نجاح، ${failCount} فشل`
-    );
-
-    toast.success(`اكتملت العملية: ${successCount}/${results.length} نجاح`);
 
     setIsExecuting(false);
-    onOperationEnd?.();
   };
 
-  const handleCopySelectedPhones = () => {
-    if (selectedAccountsList.length === 0) {
-      toast.error("لا توجد حسابات محددة للنسخ");
-      return;
-    }
-
-    const phones = selectedAccountsList.map((a) => a.phone).join("\n");
-    navigator.clipboard.writeText(phones);
-    toast.success(`تم نسخ ${selectedAccountsList.length} رقم هاتف`);
-    addLog("success", `تم نسخ ${selectedAccountsList.length} رقم للحافظة`);
-  };
-
-  const handleTransferToGroup = async () => {
-    if (!transferTargetGroup.trim()) {
+  // Step 3: Add extracted members to target group
+  const handleAddMembersToTarget = async () => {
+    if (!targetGroup.trim()) {
       toast.error("يرجى إدخال رابط المجموعة المستهدفة");
       return;
     }
-
+    if (extractedMembers.length === 0) {
+      toast.error("لا يوجد أعضاء للإضافة");
+      return;
+    }
     if (selectedAccountsList.length === 0) {
       toast.error("يرجى تحديد حساب واحد على الأقل");
       return;
     }
 
-    setShowTransferDialog(false);
     setIsExecuting(true);
-    setOperationResults([]);
-    setOperationProgress({ current: 0, total: selectedAccountsList.length });
+    setWorkflowStep("adding");
+    setProgress({ current: 0, total: extractedMembers.length });
     onOperationStart?.();
 
-    const results: GroupOperationResult[] = [];
+    addLog("info", `بدء إضافة ${extractedMembers.length} عضو للمجموعة المستهدفة...`);
 
-    addLog("info", `بدء نقل ${selectedAccountsList.length} حساب إلى المجموعة الجديدة...`);
+    let successCount = 0;
+    let accountIndex = 0;
 
-    for (let i = 0; i < selectedAccountsList.length; i++) {
-      const account = selectedAccountsList[i];
+    for (let i = 0; i < extractedMembers.length; i++) {
+      const member = extractedMembers[i];
+      const account = selectedAccountsList[accountIndex % selectedAccountsList.length];
 
-      addLog("info", `جاري نقل الحساب: ${account.phone}`, account.phone);
-
-      // First, leave current group if specified
-      if (groupLink.trim()) {
-        addLog("info", `مغادرة المجموعة الحالية...`, account.phone);
-        await executeGroupOperation(account, "leaveGroup", groupLink);
-        await sleep(2000); // Small delay between leave and join
+      if (!account.sessionString) {
+        accountIndex++;
+        continue;
       }
 
-      // Then join new group
-      const result = await executeGroupOperation(account, "joinGroup", transferTargetGroup);
-      results.push(result);
+      try {
+        const { data, error } = await supabase.functions.invoke("telegram-auth", {
+          body: {
+            action: "addMemberToGroup",
+            sessionString: account.sessionString,
+            groupLink: targetGroup,
+            userId: member.oderId,
+            username: member.username,
+            apiId: account.apiId,
+            apiHash: account.apiHash,
+          },
+        });
 
-      if (result.success) {
-        addLog("success", `تم نقل الحساب بنجاح: ${account.phone}`, account.phone);
-      } else {
-        addLog("error", `فشل نقل الحساب: ${account.phone} - ${result.error}`, account.phone);
+        if (error || data?.error) {
+          addLog("error", `فشل إضافة @${member.username || member.oderId}`, account.phone);
+        } else {
+          successCount++;
+          addLog("success", `تمت إضافة @${member.username || member.firstName}`, account.phone);
+        }
+      } catch (err) {
+        addLog("error", `خطأ في الإضافة: @${member.username}`, account.phone);
       }
 
-      setOperationProgress({ current: i + 1, total: selectedAccountsList.length });
-      setOperationResults([...results]);
+      setProgress({ current: i + 1, total: extractedMembers.length });
 
-      if (i < selectedAccountsList.length - 1) {
-        const delay = getRandomDelay();
-        addLog("info", `انتظار ${Math.round(delay / 1000)} ثانية...`);
-        await sleep(delay);
+      // Rotate accounts every few members
+      if ((i + 1) % 5 === 0) {
+        accountIndex++;
+      }
+
+      if (i < extractedMembers.length - 1) {
+        await sleep(delaySeconds * 1000);
       }
     }
 
-    const successCount = results.filter((r) => r.success).length;
-    addLog("success", `اكتمل النقل: ${successCount}/${results.length} نجاح`);
-    toast.success(`تم نقل ${successCount} حساب بنجاح`);
-
+    addLog("success", `اكتملت الإضافة: ${successCount}/${extractedMembers.length} نجاح`);
+    toast.success(`تمت إضافة ${successCount} عضو بنجاح`);
+    
+    setWorkflowStep("complete");
     setIsExecuting(false);
-    setTransferTargetGroup("");
     onOperationEnd?.();
   };
 
-  const progressPercent =
-    operationProgress.total > 0
-      ? (operationProgress.current / operationProgress.total) * 100
-      : 0;
+  // Reset workflow
+  const handleReset = () => {
+    setWorkflowStep("idle");
+    setSourceGroup("");
+    setTargetGroup("");
+    setExtractedMembers([]);
+    setProgress({ current: 0, total: 0 });
+  };
+
+  const progressPercent = progress.total > 0 ? (progress.current / progress.total) * 100 : 0;
 
   return (
     <Card className="h-full flex flex-col">
       <CardHeader className="pb-3 flex-shrink-0">
         <CardTitle className="text-base flex items-center gap-2">
           <Settings className="w-4 h-4" />
-          العمليات
+          سحب الأعضاء ونقلهم
         </CardTitle>
       </CardHeader>
-      <CardContent className="flex-1 overflow-auto">
-        <Tabs defaultValue="groups" className="h-full">
-          <TabsList className="grid w-full grid-cols-2 mb-4">
-            <TabsTrigger value="groups">المجموعات</TabsTrigger>
-            <TabsTrigger value="settings">الإعدادات</TabsTrigger>
-          </TabsList>
 
-          <TabsContent value="groups" className="space-y-4 mt-0">
-            {/* Operation Type */}
-            <div className="space-y-2">
-              <Label>نوع العملية</Label>
-              <Select value={operationType} onValueChange={setOperationType}>
-                <SelectTrigger>
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="join-public">
-                    <span className="flex items-center gap-2">
-                      <LogIn className="w-4 h-4" />
-                      الانضمام لمجموعة عامة
-                    </span>
-                  </SelectItem>
-                  <SelectItem value="join-private">
-                    <span className="flex items-center gap-2">
-                      <LogIn className="w-4 h-4" />
-                      الانضمام لمجموعة خاصة
-                    </span>
-                  </SelectItem>
-                  <SelectItem value="leave-public">
-                    <span className="flex items-center gap-2">
-                      <LogOut className="w-4 h-4" />
-                      مغادرة مجموعة عامة
-                    </span>
-                  </SelectItem>
-                  <SelectItem value="leave-private">
-                    <span className="flex items-center gap-2">
-                      <LogOut className="w-4 h-4" />
-                      مغادرة مجموعة خاصة
-                    </span>
-                  </SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
+      <CardContent className="flex-1 overflow-auto space-y-4">
+        {/* Step Indicator */}
+        <div className="flex items-center justify-between text-xs text-muted-foreground">
+          <span className={workflowStep !== "idle" ? "text-primary font-medium" : ""}>
+            1. انضمام
+          </span>
+          <ArrowDown className="w-3 h-3 rotate-[-90deg]" />
+          <span className={["extracted", "adding", "complete"].includes(workflowStep) ? "text-primary font-medium" : ""}>
+            2. استخراج
+          </span>
+          <ArrowDown className="w-3 h-3 rotate-[-90deg]" />
+          <span className={workflowStep === "complete" ? "text-primary font-medium" : ""}>
+            3. إضافة
+          </span>
+        </div>
 
-            {/* Group Link */}
-            <div className="space-y-2">
-              <Label htmlFor="groupLink">رابط المجموعة</Label>
-              <Input
-                id="groupLink"
-                placeholder="https://t.me/groupname أو @groupname"
-                value={groupLink}
-                onChange={(e) => setGroupLink(e.target.value)}
-                dir="ltr"
-                className="text-left"
-              />
-            </div>
+        <Separator />
 
-            {/* Action Buttons */}
-            <div className="grid grid-cols-2 gap-2">
-              <Button
-                onClick={handleStartOperation}
-                disabled={isExecuting || selectedAccounts === 0 || !groupLink.trim()}
-                className="gap-2"
-              >
-                {isExecuting ? (
-                  <Loader2 className="w-4 h-4 animate-spin" />
-                ) : (
-                  <Play className="w-4 h-4" />
-                )}
-                تنفيذ العملية
-              </Button>
+        {/* Source Group Input */}
+        <div className="space-y-2">
+          <Label className="flex items-center gap-2">
+            <LogIn className="w-4 h-4" />
+            المجموعة المصدر (للانضمام والسحب منها)
+          </Label>
+          <Input
+            placeholder="https://t.me/groupname أو @groupname"
+            value={sourceGroup}
+            onChange={(e) => setSourceGroup(e.target.value)}
+            disabled={workflowStep !== "idle"}
+            dir="ltr"
+            className="text-left"
+          />
+        </div>
 
-              <Button
-                variant="outline"
-                onClick={handleCopySelectedPhones}
-                disabled={selectedAccounts === 0}
-                className="gap-2"
-              >
-                <Copy className="w-4 h-4" />
-                نسخ الأرقام
-              </Button>
-            </div>
+        {/* Step 1: Join Button */}
+        <Button
+          onClick={handleJoinGroup}
+          disabled={isExecuting || selectedAccounts === 0 || !sourceGroup.trim() || workflowStep !== "idle"}
+          className="w-full gap-2"
+          variant={workflowStep === "joined" ? "outline" : "default"}
+        >
+          {workflowStep === "joining" ? (
+            <Loader2 className="w-4 h-4 animate-spin" />
+          ) : workflowStep !== "idle" ? (
+            <CheckCircle className="w-4 h-4 text-primary" />
+          ) : (
+            <LogIn className="w-4 h-4" />
+          )}
+          {workflowStep === "joining" 
+            ? "جاري الانضمام..." 
+            : workflowStep !== "idle" 
+            ? "تم الانضمام ✓" 
+            : `انضمام ${selectedAccounts} حساب للمجموعة`}
+        </Button>
 
-            {/* Transfer Button */}
-            <Dialog open={showTransferDialog} onOpenChange={setShowTransferDialog}>
-              <DialogTrigger asChild>
-                <Button
-                  variant="secondary"
-                  className="w-full gap-2"
-                  disabled={selectedAccounts === 0 || isExecuting}
-                >
-                  <ArrowLeftRight className="w-4 h-4" />
-                  نقل الحسابات لمجموعة أخرى
-                </Button>
-              </DialogTrigger>
-              <DialogContent dir="rtl">
-                <DialogHeader>
-                  <DialogTitle>نقل الحسابات</DialogTitle>
-                  <DialogDescription>
-                    سيتم نقل {selectedAccounts} حساب إلى المجموعة الجديدة
-                  </DialogDescription>
-                </DialogHeader>
-                <div className="space-y-4 py-4">
-                  <div className="space-y-2">
-                    <Label>المجموعة الحالية (اختياري - للمغادرة منها)</Label>
-                    <Input
-                      placeholder="اتركه فارغاً للانضمام فقط"
-                      value={groupLink}
-                      onChange={(e) => setGroupLink(e.target.value)}
-                      dir="ltr"
-                      className="text-left"
-                    />
-                  </div>
-                  <div className="space-y-2">
-                    <Label>المجموعة المستهدفة (للانضمام إليها)</Label>
-                    <Input
-                      placeholder="https://t.me/newgroup أو @newgroup"
-                      value={transferTargetGroup}
-                      onChange={(e) => setTransferTargetGroup(e.target.value)}
-                      dir="ltr"
-                      className="text-left"
-                    />
-                  </div>
-                </div>
-                <DialogFooter>
-                  <Button variant="outline" onClick={() => setShowTransferDialog(false)}>
-                    إلغاء
-                  </Button>
-                  <Button onClick={handleTransferToGroup} disabled={!transferTargetGroup.trim()}>
-                    بدء النقل
-                  </Button>
-                </DialogFooter>
-              </DialogContent>
-            </Dialog>
-
-            {/* Progress (when executing) */}
-            {isExecuting && (
-              <div className="p-4 rounded-lg bg-accent/50 border space-y-3">
-                <div className="flex items-center justify-between text-sm">
-                  <span className="text-muted-foreground">التقدم:</span>
-                  <span className="font-medium">
-                    {operationProgress.current} / {operationProgress.total}
-                  </span>
-                </div>
-                <Progress value={progressPercent} className="h-2" />
-                <p className="text-xs text-muted-foreground text-center">
-                  جاري التنفيذ... يرجى الانتظار
-                </p>
-              </div>
+        {/* Step 2: Extract Button */}
+        {["joined", "extracted", "adding", "complete"].includes(workflowStep) && (
+          <Button
+            onClick={handleExtractMembers}
+            disabled={isExecuting || workflowStep === "extracting" || ["extracted", "adding", "complete"].includes(workflowStep)}
+            className="w-full gap-2"
+            variant={["extracted", "adding", "complete"].includes(workflowStep) ? "outline" : "secondary"}
+          >
+            {workflowStep === "extracting" ? (
+              <Loader2 className="w-4 h-4 animate-spin" />
+            ) : ["extracted", "adding", "complete"].includes(workflowStep) ? (
+              <CheckCircle className="w-4 h-4 text-primary" />
+            ) : (
+              <Users className="w-4 h-4" />
             )}
+            {workflowStep === "extracting" 
+              ? "جاري الاستخراج..." 
+              : ["extracted", "adding", "complete"].includes(workflowStep)
+              ? `تم استخراج ${extractedMembers.length} عضو ✓`
+              : "استخراج أعضاء المجموعة"}
+          </Button>
+        )}
 
-            {/* Results Summary */}
-            {operationResults.length > 0 && !isExecuting && (
-              <div className="p-4 rounded-lg bg-muted/50 border space-y-2">
-                <h4 className="text-sm font-medium">نتائج العملية</h4>
-                <div className="flex items-center justify-between text-sm">
-                  <span className="text-primary">نجاح:</span>
-                  <span className="font-medium">
-                    {operationResults.filter((r) => r.success).length}
-                  </span>
-                </div>
-                <div className="flex items-center justify-between text-sm">
-                  <span className="text-destructive">فشل:</span>
-                  <span className="font-medium">
-                    {operationResults.filter((r) => !r.success).length}
-                  </span>
-                </div>
-              </div>
+        {/* Target Group Input */}
+        {["extracted", "adding", "complete"].includes(workflowStep) && (
+          <div className="space-y-2">
+            <Label className="flex items-center gap-2">
+              <UserPlus className="w-4 h-4" />
+              المجموعة المستهدفة (لإضافة الأعضاء إليها)
+            </Label>
+            <Input
+              placeholder="https://t.me/targetgroup أو @targetgroup"
+              value={targetGroup}
+              onChange={(e) => setTargetGroup(e.target.value)}
+              disabled={workflowStep === "adding" || workflowStep === "complete"}
+              dir="ltr"
+              className="text-left"
+            />
+          </div>
+        )}
+
+        {/* Step 3: Add Members Button */}
+        {["extracted", "adding", "complete"].includes(workflowStep) && (
+          <Button
+            onClick={handleAddMembersToTarget}
+            disabled={isExecuting || !targetGroup.trim() || workflowStep === "complete"}
+            className="w-full gap-2"
+            variant={workflowStep === "complete" ? "outline" : "default"}
+          >
+            {workflowStep === "adding" ? (
+              <Loader2 className="w-4 h-4 animate-spin" />
+            ) : workflowStep === "complete" ? (
+              <CheckCircle className="w-4 h-4 text-primary" />
+            ) : (
+              <UserPlus className="w-4 h-4" />
             )}
+            {workflowStep === "adding" 
+              ? "جاري الإضافة..." 
+              : workflowStep === "complete"
+              ? "تمت الإضافة بنجاح ✓"
+              : `إضافة ${extractedMembers.length} عضو للمجموعة`}
+          </Button>
+        )}
 
-            {/* Status */}
-            <div className="p-4 rounded-lg bg-accent/50 border">
-              <div className="flex items-center justify-between text-sm">
-                <span className="text-muted-foreground">الحسابات المحددة:</span>
-                <span className="font-medium">{selectedAccounts}</span>
-              </div>
-              <div className="flex items-center justify-between text-sm mt-2">
-                <span className="text-muted-foreground">الحالة:</span>
-                <span
-                  className={`font-medium ${
-                    isExecuting ? "text-green-500" : "text-muted-foreground"
-                  }`}
-                >
-                  {isExecuting ? "قيد التشغيل" : "جاهز"}
-                </span>
-              </div>
+        {/* Progress Bar */}
+        {isExecuting && (
+          <div className="p-4 rounded-lg bg-accent/50 border space-y-3">
+            <div className="flex items-center justify-between text-sm">
+              <span className="text-muted-foreground">التقدم:</span>
+              <span className="font-medium">
+                {progress.current} / {progress.total}
+              </span>
             </div>
-          </TabsContent>
+            <Progress value={progressPercent} className="h-2" />
+          </div>
+        )}
 
-          <TabsContent value="settings" className="space-y-6 mt-0">
-            {/* Delay Settings */}
-            <div className="space-y-4">
-              <div className="flex items-center gap-2">
-                <Clock className="w-4 h-4 text-muted-foreground" />
-                <Label>التأخير بين العمليات (ثانية)</Label>
-              </div>
-              <div className="grid grid-cols-2 gap-4">
-                <div className="space-y-2">
-                  <Label className="text-xs text-muted-foreground">الحد الأدنى</Label>
-                  <Input
-                    type="number"
-                    value={delayMin}
-                    onChange={(e) => setDelayMin(Number(e.target.value))}
-                    min={5}
-                    max={300}
-                  />
-                </div>
-                <div className="space-y-2">
-                  <Label className="text-xs text-muted-foreground">الحد الأقصى</Label>
-                  <Input
-                    type="number"
-                    value={delayMax}
-                    onChange={(e) => setDelayMax(Number(e.target.value))}
-                    min={5}
-                    max={300}
-                  />
-                </div>
-              </div>
-            </div>
+        {/* Delay Setting */}
+        <div className="space-y-2">
+          <Label className="text-xs text-muted-foreground">
+            التأخير بين العمليات (ثانية)
+          </Label>
+          <Input
+            type="number"
+            value={delaySeconds}
+            onChange={(e) => setDelaySeconds(Number(e.target.value))}
+            min={5}
+            max={120}
+            disabled={isExecuting}
+          />
+        </div>
 
-            {/* Accounts Per Batch */}
-            <div className="space-y-4">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <Users className="w-4 h-4 text-muted-foreground" />
-                  <Label>الحسابات لكل دفعة</Label>
-                </div>
-                <span className="text-sm font-medium">{accountsPerBatch}</span>
-              </div>
-              <Slider
-                value={[accountsPerBatch]}
-                onValueChange={(v) => setAccountsPerBatch(v[0])}
-                min={1}
-                max={20}
-                step={1}
-              />
-            </div>
+        {/* Reset Button */}
+        {workflowStep === "complete" && (
+          <Button onClick={handleReset} variant="outline" className="w-full">
+            بدء عملية جديدة
+          </Button>
+        )}
 
-            {/* Protection Settings */}
-            <div className="p-4 rounded-lg bg-accent/30 border space-y-3">
-              <h4 className="text-sm font-medium">إعدادات الحماية</h4>
-              <ul className="text-xs text-muted-foreground space-y-1">
-                <li>• إيقاف تلقائي عند الحظر</li>
-                <li>• تجاهل الحسابات المقيدة</li>
-                <li>• توزيع الحمل على الحسابات</li>
-                <li>• تأخير عشوائي بين العمليات</li>
-              </ul>
+        {/* Status */}
+        <div className="p-4 rounded-lg bg-muted/50 border">
+          <div className="flex items-center justify-between text-sm">
+            <span className="text-muted-foreground">الحسابات المحددة:</span>
+            <span className="font-medium">{selectedAccounts}</span>
+          </div>
+          {extractedMembers.length > 0 && (
+            <div className="flex items-center justify-between text-sm mt-2">
+              <span className="text-muted-foreground">الأعضاء المستخرجون:</span>
+              <span className="font-medium">{extractedMembers.length}</span>
             </div>
-          </TabsContent>
-        </Tabs>
+          )}
+        </div>
       </CardContent>
     </Card>
   );

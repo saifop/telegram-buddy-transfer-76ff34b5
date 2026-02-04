@@ -242,6 +242,7 @@ const Index = () => {
                       addLog={addLog}
                       onOperationStart={() => setOperationStatus("running")}
                       onOperationEnd={() => setOperationStatus("idle")}
+                      onMembersExtracted={handleImportMembers}
                     />
                   </div>
 
