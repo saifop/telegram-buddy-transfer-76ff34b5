@@ -543,7 +543,7 @@ async function handleGetGroupMembers({ sessionString, groupLink, apiId, apiHash 
 /**
  * Add a member to a group
  */
-async function handleAddMemberToGroup({ sessionString, groupLink, userId, username, apiId, apiHash }, res) {
+async function handleAddMemberToGroup({ sessionString, groupLink, userId, username, sourceGroup, apiId, apiHash }, res) {
   if (!sessionString || !groupLink || (!userId && !username)) {
     return res.status(400).json({ error: 'Missing required parameters' });
   }
@@ -559,17 +559,76 @@ async function handleAddMemberToGroup({ sessionString, groupLink, userId, userna
     
     console.log(`Adding user ${username || userId} to group: ${value}`);
     
-    // Get the target user
-    const userToAdd = username ? username : userId;
-    
-    // Get the channel entity
+    // Get the channel entity first
     const channel = await client.getEntity(value);
+    
+    let userEntity;
+    
+    // Priority 1: Try username if available (most reliable)
+    if (username && username.trim()) {
+      try {
+        userEntity = await client.getEntity(username);
+        console.log(`Found user by username: ${username}`);
+      } catch (e) {
+        console.log(`Could not find user by username ${username}: ${e.message}`);
+      }
+    }
+    
+    // Priority 2: Try to get user from source group participants cache
+    if (!userEntity && sourceGroup) {
+      try {
+        const { value: sourceValue } = parseGroupLink(sourceGroup);
+        if (sourceValue) {
+          const sourceChannel = await client.getEntity(sourceValue);
+          // Get participants to cache the users
+          const participants = await client.invoke(
+            new Api.channels.GetParticipants({
+              channel: sourceChannel,
+              filter: new Api.ChannelParticipantsSearch({ q: '' }),
+              offset: 0,
+              limit: 200,
+              hash: BigInt(0),
+            })
+          );
+          
+          // Find the user in participants
+          const foundUser = participants.users.find(u => u.id.toString() === userId.toString());
+          if (foundUser) {
+            userEntity = foundUser;
+            console.log(`Found user in source group participants: ${userId}`);
+          }
+        }
+      } catch (e) {
+        console.log(`Could not get user from source group: ${e.message}`);
+      }
+    }
+    
+    // Priority 3: Try direct ID access (may fail for unseen users)
+    if (!userEntity && userId) {
+      try {
+        // Try using InputPeerUser with access_hash of 0 (sometimes works)
+        userEntity = new Api.InputPeerUser({
+          userId: BigInt(userId),
+          accessHash: BigInt(0),
+        });
+        console.log(`Using InputPeerUser for userId: ${userId}`);
+      } catch (e) {
+        console.log(`Could not create InputPeerUser: ${e.message}`);
+      }
+    }
+    
+    if (!userEntity) {
+      await client.disconnect();
+      return res.status(400).json({ 
+        error: 'لا يمكن العثور على المستخدم. تأكد من أن لديه username أو أنك عضو في نفس المجموعة' 
+      });
+    }
     
     // Add user to channel
     await client.invoke(
       new Api.channels.InviteToChannel({
         channel: channel,
-        users: [userToAdd],
+        users: [userEntity],
       })
     );
     
@@ -596,8 +655,11 @@ async function handleAddMemberToGroup({ sessionString, groupLink, userId, userna
     if (errorMessage.includes('PEER_FLOOD')) {
       return res.status(429).json({ error: 'تم تجاوز الحد المسموح. انتظر قبل المحاولة' });
     }
-    if (errorMessage.includes('CHAT_ADMIN_REQUIRED')) {
+    if (errorMessage.includes('CHAT_ADMIN_REQUIRED') || errorMessage.includes('CHAT_WRITE_FORBIDDEN')) {
       return res.status(400).json({ error: 'يجب أن تكون مشرفاً للإضافة' });
+    }
+    if (errorMessage.includes('Could not find the input entity')) {
+      return res.status(400).json({ error: 'لا يمكن العثور على المستخدم. يجب أن يكون لديه username' });
     }
     
     return res.status(500).json({ error: `خطأ في الإضافة: ${errorMessage}` });

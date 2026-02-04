@@ -5,6 +5,7 @@ import type { TelegramAccount, LogEntry } from "@/pages/Index";
 
 interface AddSettings {
   targetGroup: string;
+  sourceGroup: string;
   membersPerAccount: number;
   delayMin: number;
   delayMax: number;
@@ -115,6 +116,7 @@ export function useAddMembers({
             action: "addMemberToGroup",
             sessionString: account.sessionString,
             groupLink: settings.targetGroup,
+            sourceGroup: settings.sourceGroup,
             userId: member.oderId,
             username: member.username,
             apiId: account.apiId,
