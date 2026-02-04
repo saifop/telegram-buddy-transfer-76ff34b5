@@ -18,20 +18,51 @@ interface SessionManagerProps {
 export function SessionManager({ onLoadSessions, onSessionExtracted }: SessionManagerProps) {
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(e.target.files || []);
     const sessionFiles = files.filter((f) => f.name.endsWith(".session"));
-    if (sessionFiles.length > 0) {
-      onLoadSessions(sessionFiles);
+    
+    for (const file of sessionFiles) {
+      try {
+        const content = await file.text();
+        // Extract phone from filename or use placeholder
+        const phone = file.name.replace(".session", "").replace(/[^0-9+]/g, "") || `+964${Math.floor(Math.random() * 1000000000).toString().padStart(9, "0")}`;
+        
+        if (onSessionExtracted) {
+          onSessionExtracted({
+            phone: phone.startsWith("+") ? phone : `+${phone}`,
+            sessionFile: file.name,
+            sessionContent: content,
+          });
+        }
+      } catch (error) {
+        console.error("Error reading session file:", error);
+        onLoadSessions([file]);
+      }
     }
   };
 
-  const handleDrop = (e: React.DragEvent) => {
+  const handleDrop = async (e: React.DragEvent) => {
     e.preventDefault();
     const files = Array.from(e.dataTransfer.files);
     const sessionFiles = files.filter((f) => f.name.endsWith(".session"));
-    if (sessionFiles.length > 0) {
-      onLoadSessions(sessionFiles);
+    
+    for (const file of sessionFiles) {
+      try {
+        const content = await file.text();
+        const phone = file.name.replace(".session", "").replace(/[^0-9+]/g, "") || `+964${Math.floor(Math.random() * 1000000000).toString().padStart(9, "0")}`;
+        
+        if (onSessionExtracted) {
+          onSessionExtracted({
+            phone: phone.startsWith("+") ? phone : `+${phone}`,
+            sessionFile: file.name,
+            sessionContent: content,
+          });
+        }
+      } catch (error) {
+        console.error("Error reading session file:", error);
+        onLoadSessions([file]);
+      }
     }
   };
 
