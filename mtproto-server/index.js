@@ -57,6 +57,10 @@ app.post('/auth', async (req, res) => {
         return await handleJoinPrivateGroup(params, res);
       case 'leaveGroup':
         return await handleLeaveGroup(params, res);
+      case 'getGroupMembers':
+        return await handleGetGroupMembers(params, res);
+      case 'addMemberToGroup':
+        return await handleAddMemberToGroup(params, res);
       default:
         return res.status(400).json({ error: 'Invalid action' });
     }
@@ -473,6 +477,130 @@ async function handleLeaveGroup({ sessionString, groupLink, apiId, apiHash }, re
     }
     
     return res.status(500).json({ error: `خطأ في المغادرة: ${errorMessage}` });
+  }
+}
+
+/**
+ * Get members from a group
+ */
+async function handleGetGroupMembers({ sessionString, groupLink, apiId, apiHash }, res) {
+  if (!sessionString || !groupLink) {
+    return res.status(400).json({ error: 'Missing required parameters' });
+  }
+
+  try {
+    const client = await getClientFromSession(sessionString, apiId || 123456, apiHash || 'demo');
+    
+    const { type, value } = parseGroupLink(groupLink);
+    
+    if (!value) {
+      return res.status(400).json({ error: 'Invalid group link' });
+    }
+    
+    console.log(`Getting members from group: ${value}`);
+    
+    // Get the channel/group entity
+    const entity = await client.getEntity(value);
+    
+    // Get participants
+    const participants = await client.getParticipants(entity, {
+      limit: 200, // Limit to avoid rate limits
+    });
+    
+    const members = participants.map(p => ({
+      id: p.id?.toString(),
+      username: p.username || '',
+      firstName: p.firstName || '',
+      lastName: p.lastName || '',
+      phone: p.phone || '',
+    }));
+    
+    await client.disconnect();
+    
+    console.log(`Extracted ${members.length} members from ${value}`);
+    
+    return res.json({
+      success: true,
+      members,
+      count: members.length,
+    });
+
+  } catch (error) {
+    console.error('GetGroupMembers error:', error);
+    
+    const errorMessage = error.message || '';
+    if (errorMessage.includes('CHANNEL_PRIVATE')) {
+      return res.status(400).json({ error: 'المجموعة خاصة ولا يمكن الوصول إليها' });
+    }
+    if (errorMessage.includes('CHAT_ADMIN_REQUIRED')) {
+      return res.status(400).json({ error: 'يجب أن تكون مشرفاً لاستخراج الأعضاء' });
+    }
+    
+    return res.status(500).json({ error: `خطأ في استخراج الأعضاء: ${errorMessage}` });
+  }
+}
+
+/**
+ * Add a member to a group
+ */
+async function handleAddMemberToGroup({ sessionString, groupLink, userId, username, apiId, apiHash }, res) {
+  if (!sessionString || !groupLink || (!userId && !username)) {
+    return res.status(400).json({ error: 'Missing required parameters' });
+  }
+
+  try {
+    const client = await getClientFromSession(sessionString, apiId || 123456, apiHash || 'demo');
+    
+    const { type, value } = parseGroupLink(groupLink);
+    
+    if (!value) {
+      return res.status(400).json({ error: 'Invalid group link' });
+    }
+    
+    console.log(`Adding user ${username || userId} to group: ${value}`);
+    
+    // Get the target user
+    const userToAdd = username ? username : userId;
+    
+    // Get the channel entity
+    const channel = await client.getEntity(value);
+    
+    // Add user to channel
+    await client.invoke(
+      new Api.channels.InviteToChannel({
+        channel: channel,
+        users: [userToAdd],
+      })
+    );
+    
+    await client.disconnect();
+    
+    return res.json({
+      success: true,
+      message: `Added ${username || userId} to ${value}`,
+    });
+
+  } catch (error) {
+    console.error('AddMemberToGroup error:', error);
+    
+    const errorMessage = error.message || '';
+    if (errorMessage.includes('USER_PRIVACY_RESTRICTED')) {
+      return res.status(400).json({ error: 'خصوصية المستخدم تمنع الإضافة' });
+    }
+    if (errorMessage.includes('USER_NOT_MUTUAL_CONTACT')) {
+      return res.status(400).json({ error: 'يجب أن يكون المستخدم جهة اتصال متبادلة' });
+    }
+    if (errorMessage.includes('USER_ALREADY_PARTICIPANT')) {
+      return res.json({ success: true, message: 'العضو موجود مسبقاً' });
+    }
+    if (errorMessage.includes('PEER_FLOOD')) {
+      return res.status(429).json({ error: 'تم تجاوز الحد المسموح. انتظر قبل المحاولة' });
+    }
+    if (errorMessage.includes('CHAT_ADMIN_REQUIRED')) {
+      return res.status(400).json({ error: 'يجب أن تكون مشرفاً للإضافة' });
+    }
+    
+    return res.status(500).json({ error: `خطأ في الإضافة: ${errorMessage}` });
   }
 }
 
