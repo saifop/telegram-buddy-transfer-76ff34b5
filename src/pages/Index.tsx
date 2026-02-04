@@ -59,6 +59,22 @@ const Index = () => {
     addLog("success", `تم تحميل ${files.length} ملف جلسة`);
   };
 
+  const handleSessionExtracted = (sessionData: {
+    phone: string;
+    sessionFile: string;
+    sessionContent: string;
+  }) => {
+    const newAccount: TelegramAccount = {
+      id: crypto.randomUUID(),
+      phone: sessionData.phone,
+      sessionFile: sessionData.sessionFile,
+      status: "connected",
+      isSelected: true,
+    };
+    setAccounts((prev) => [...prev, newAccount]);
+    addLog("success", `تم استخراج وحفظ جلسة جديدة: ${sessionData.phone}`);
+  };
+
   const handleToggleAccount = (id: string) => {
     setAccounts((prev) =>
       prev.map((acc) => (acc.id === id ? { ...acc, isSelected: !acc.isSelected } : acc))
@@ -192,7 +208,10 @@ const Index = () => {
                 <div className="h-full grid grid-cols-1 lg:grid-cols-3 gap-4">
                   {/* Left Panel - Sessions & Accounts */}
                   <div className="lg:col-span-1 flex flex-col gap-4 overflow-hidden">
-                    <SessionManager onLoadSessions={handleLoadSessions} />
+                    <SessionManager 
+                      onLoadSessions={handleLoadSessions} 
+                      onSessionExtracted={handleSessionExtracted}
+                    />
                     <AccountsList
                       accounts={accounts}
                       onToggleAccount={handleToggleAccount}
