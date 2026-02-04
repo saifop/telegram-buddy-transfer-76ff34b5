@@ -122,33 +122,48 @@ Deno.serve(async (req) => {
           // Extract user-friendly error message from the external service
           const externalError = (data as { error?: string })?.error;
           if (externalError) {
-            // Map common Telegram errors to user-friendly messages
-            if (externalError.includes("CHAT_WRITE_FORBIDDEN")) {
-              return errorResponse("ليس لديك صلاحية إضافة أعضاء لهذه المجموعة. تأكد أنك مشرف.", 403);
-            }
-            if (externalError.includes("USER_PRIVACY_RESTRICTED")) {
-              return errorResponse("خصوصية المستخدم تمنع الإضافة", 403);
-            }
-            if (externalError.includes("USER_NOT_MUTUAL_CONTACT")) {
-              return errorResponse("يجب أن يكون المستخدم جهة اتصال متبادلة", 403);
-            }
-            if (externalError.includes("PEER_FLOOD") || externalError.includes("FLOOD")) {
-              return errorResponse("تم تجاوز الحد المسموح. انتظر قبل المحاولة", 429);
-            }
-            if (externalError.includes("CHAT_ADMIN_REQUIRED")) {
-              return errorResponse("يجب أن تكون مشرفاً للإضافة", 403);
-            }
-            if (externalError.includes("USER_ID_INVALID")) {
-              return errorResponse("لا يمكن التعرف على هذا المستخدم. تأكد من وجود username أو أن الحساب شاهد المستخدم مسبقاً", 400);
-            }
-            if (externalError.includes("USER_NOT_PARTICIPANT")) {
-              return errorResponse("المستخدم ليس عضواً في المجموعة المصدر", 400);
-            }
-            if (externalError.includes("USER_ALREADY_PARTICIPANT")) {
-              return errorResponse("المستخدم موجود مسبقاً في المجموعة المستهدفة", 400);
-            }
-            // Return the original error message if not mapped
-            return errorResponse(externalError, response.status);
+          // Map common Telegram errors to user-friendly messages
+          if (externalError.includes("CHAT_WRITE_FORBIDDEN")) {
+            return errorResponse("ليس لديك صلاحية إضافة أعضاء لهذه المجموعة. تأكد أنك مشرف.", 403);
+          }
+          if (externalError.includes("USER_PRIVACY_RESTRICTED")) {
+            return errorResponse("خصوصية المستخدم تمنع الإضافة", 403);
+          }
+          if (externalError.includes("USER_NOT_MUTUAL_CONTACT")) {
+            return errorResponse("يجب أن يكون المستخدم جهة اتصال متبادلة", 403);
+          }
+          if (externalError.includes("PEER_FLOOD") || externalError.includes("FLOOD")) {
+            // Try to extract wait time from error
+            const waitMatch = externalError.match(/FLOOD_WAIT[_\s]*(\d+)/i);
+            const waitSeconds = waitMatch ? waitMatch[1] : "60";
+            return errorResponse(`تم تجاوز الحد المسموح. انتظر ${waitSeconds} ثانية قبل المحاولة`, 429);
+          }
+          if (externalError.includes("CHAT_ADMIN_REQUIRED")) {
+            return errorResponse("يجب أن تكون مشرفاً للإضافة", 403);
+          }
+          if (externalError.includes("USER_ID_INVALID")) {
+            return errorResponse("لا يمكن التعرف على هذا المستخدم. تأكد من وجود username أو أن الحساب شاهد المستخدم مسبقاً", 400);
+          }
+          if (externalError.includes("USER_NOT_PARTICIPANT")) {
+            return errorResponse("المستخدم ليس عضواً في المجموعة المصدر", 400);
+          }
+          if (externalError.includes("USER_ALREADY_PARTICIPANT")) {
+            return errorResponse("المستخدم موجود مسبقاً في المجموعة المستهدفة", 400);
+          }
+          if (externalError.includes("USER_CHANNELS_TOO_MUCH")) {
+            return errorResponse("العضو موجود في أكثر من 500 مجموعة (حد تيليجرام) - تم تخطيه", 400);
+          }
+          if (externalError.includes("USERS_TOO_MUCH")) {
+            return errorResponse("المجموعة المستهدفة وصلت للحد الأقصى من الأعضاء", 400);
+          }
+          if (externalError.includes("USER_BANNED_IN_CHANNEL")) {
+            return errorResponse("العضو محظور من هذه المجموعة", 403);
+          }
+          if (externalError.includes("USER_KICKED")) {
+            return errorResponse("العضو مطرود من هذه المجموعة ولا يمكن إضافته", 403);
+          }
+          // Return the original error message if not mapped
+          return errorResponse(externalError, response.status);
           }
           
           return errorResponse("Authentication service error", 502);
