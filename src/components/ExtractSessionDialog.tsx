@@ -37,9 +37,9 @@ interface ExtractSessionDialogProps {
 export function ExtractSessionDialog({ onSessionExtracted }: ExtractSessionDialogProps) {
   const [open, setOpen] = useState(false);
   
-  // Form data
-  const [apiId, setApiId] = useState("");
-  const [apiHash, setApiHash] = useState("");
+  // Form data - Pre-configured API credentials
+  const [apiId] = useState("38763488");
+  const [apiHash] = useState("e7e593b5bfed97ca142c557824361e02");
   const [phoneNumber, setPhoneNumber] = useState("");
   const [verificationCode, setVerificationCode] = useState("");
   const [twoFactorPassword, setTwoFactorPassword] = useState("");
@@ -58,8 +58,6 @@ export function ExtractSessionDialog({ onSessionExtracted }: ExtractSessionDialo
 
   const resetForm = () => {
     reset();
-    setApiId("");
-    setApiHash("");
     setPhoneNumber("");
     setVerificationCode("");
     setTwoFactorPassword("");
@@ -148,8 +146,8 @@ export function ExtractSessionDialog({ onSessionExtracted }: ExtractSessionDialo
     }
   };
 
-  // Show phone step if we have credentials but haven't started auth yet
-  const showPhoneStep = step === "credentials" && apiId && apiHash;
+  // Always show phone step directly since credentials are pre-configured
+  const showPhoneStep = step === "credentials";
 
   return (
     <Dialog open={open} onOpenChange={handleOpenChange}>
@@ -188,66 +186,8 @@ export function ExtractSessionDialog({ onSessionExtracted }: ExtractSessionDialo
           </div>
         )}
 
-        {/* Step: Credentials */}
-        {step === "credentials" && !showPhoneStep && (
-          <div className="space-y-4">
-            <div className="p-3 rounded-lg bg-muted/50 text-xs text-muted-foreground">
-              <p className="font-medium mb-1">كيفية الحصول على API ID و Hash:</p>
-              <ol className="list-decimal list-inside space-y-0.5">
-                <li>افتح my.telegram.org</li>
-                <li>سجل الدخول برقم هاتفك</li>
-                <li>انتقل إلى "API development tools"</li>
-                <li>أنشئ تطبيقاً جديداً واحصل على البيانات</li>
-              </ol>
-            </div>
-
-            <div className="space-y-2">
-              <Label htmlFor="apiId" className="flex items-center gap-2">
-                <Hash className="w-4 h-4" />
-                API ID
-              </Label>
-              <Input
-                id="apiId"
-                type="text"
-                placeholder="مثال: 12345678"
-                value={apiId}
-                onChange={(e) => setApiId(e.target.value)}
-                dir="ltr"
-                className="text-left"
-              />
-            </div>
-
-            <div className="space-y-2">
-              <Label htmlFor="apiHash" className="flex items-center gap-2">
-                <Key className="w-4 h-4" />
-                API Hash
-              </Label>
-              <Input
-                id="apiHash"
-                type="password"
-                placeholder="أدخل API Hash"
-                value={apiHash}
-                onChange={(e) => setApiHash(e.target.value)}
-                dir="ltr"
-                className="text-left"
-              />
-            </div>
-
-            <Button
-              onClick={handleSubmitCredentials}
-              disabled={isLoading || !apiId || !apiHash}
-              className="w-full"
-            >
-              {isLoading ? (
-                <Loader2 className="w-4 h-4 animate-spin ml-2" />
-              ) : null}
-              التالي
-            </Button>
-          </div>
-        )}
-
-        {/* Step: Phone */}
-        {(step === "phone" || showPhoneStep) && (
+        {/* Step: Phone - Show directly since credentials are pre-configured */}
+        {showPhoneStep && (
           <div className="space-y-4">
             <div className="space-y-2">
               <Label htmlFor="phone" className="flex items-center gap-2">
