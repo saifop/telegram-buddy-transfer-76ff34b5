@@ -118,6 +118,30 @@ Deno.serve(async (req) => {
 
         if (!response.ok) {
           console.error("External service non-OK status:", response.status, data);
+          
+          // Extract user-friendly error message from the external service
+          const externalError = (data as { error?: string })?.error;
+          if (externalError) {
+            // Map common Telegram errors to user-friendly messages
+            if (externalError.includes("CHAT_WRITE_FORBIDDEN")) {
+              return errorResponse("ليس لديك صلاحية إضافة أعضاء لهذه المجموعة. تأكد أنك مشرف.", 403);
+            }
+            if (externalError.includes("USER_PRIVACY_RESTRICTED")) {
+              return errorResponse("خصوصية المستخدم تمنع الإضافة", 403);
+            }
+            if (externalError.includes("USER_NOT_MUTUAL_CONTACT")) {
+              return errorResponse("يجب أن يكون المستخدم جهة اتصال متبادلة", 403);
+            }
+            if (externalError.includes("PEER_FLOOD") || externalError.includes("FLOOD")) {
+              return errorResponse("تم تجاوز الحد المسموح. انتظر قبل المحاولة", 429);
+            }
+            if (externalError.includes("CHAT_ADMIN_REQUIRED")) {
+              return errorResponse("يجب أن تكون مشرفاً للإضافة", 403);
+            }
+            // Return the original error message if not mapped
+            return errorResponse(externalError, response.status);
+          }
+          
           return errorResponse("Authentication service error", 502);
         }
 
