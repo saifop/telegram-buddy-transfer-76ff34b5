@@ -138,6 +138,15 @@ Deno.serve(async (req) => {
             if (externalError.includes("CHAT_ADMIN_REQUIRED")) {
               return errorResponse("يجب أن تكون مشرفاً للإضافة", 403);
             }
+            if (externalError.includes("USER_ID_INVALID")) {
+              return errorResponse("لا يمكن التعرف على هذا المستخدم. تأكد من وجود username أو أن الحساب شاهد المستخدم مسبقاً", 400);
+            }
+            if (externalError.includes("USER_NOT_PARTICIPANT")) {
+              return errorResponse("المستخدم ليس عضواً في المجموعة المصدر", 400);
+            }
+            if (externalError.includes("USER_ALREADY_PARTICIPANT")) {
+              return errorResponse("المستخدم موجود مسبقاً في المجموعة المستهدفة", 400);
+            }
             // Return the original error message if not mapped
             return errorResponse(externalError, response.status);
           }
