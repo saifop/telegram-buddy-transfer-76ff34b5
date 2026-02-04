@@ -73,39 +73,22 @@ Deno.serve(async (req) => {
   try {
     // Initialize Supabase client
     const supabaseUrl = Deno.env.get("SUPABASE_URL");
-    const supabaseAnonKey = Deno.env.get("SUPABASE_ANON_KEY");
+    const supabaseServiceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
 
-    if (!supabaseUrl || !supabaseAnonKey) {
+    if (!supabaseUrl || !supabaseServiceKey) {
       console.error("Missing Supabase environment variables");
       return errorResponse("Service configuration error", 500);
     }
 
-    // Get authorization header
-    const authHeader = req.headers.get("Authorization");
-    if (!authHeader?.startsWith("Bearer ")) {
-      return errorResponse("Authentication required", 401);
-    }
-
-    // Create authenticated Supabase client
-    const supabase = createClient(supabaseUrl, supabaseAnonKey, {
-      global: { headers: { Authorization: authHeader } },
-    });
-
-    // Verify JWT and get user
-    const token = authHeader.replace("Bearer ", "");
-    const { data: userData, error: authError } = await supabase.auth.getUser(token);
-
-    if (authError || !userData?.user) {
-      console.error("Auth error:", authError?.message);
-      return errorResponse("Invalid or expired token", 401);
-    }
-
-    const userId = userData.user.id;
-    console.log(`Authenticated user: ${userId}`);
+    // Create Supabase client with service role (no auth required)
+    const supabase = createClient(supabaseUrl, supabaseServiceKey);
 
     // Parse request body
     const { action, ...params } = await req.json();
     console.log(`Telegram auth action: ${action}`);
+
+    // Generate a temporary user ID for this session
+    const tempUserId = crypto.randomUUID();
 
     switch (action) {
       case "sendCode": {
@@ -122,17 +105,11 @@ Deno.serve(async (req) => {
           return errorResponse("Invalid phone number format. Use +[country][number]");
         }
 
-        // Clean up any existing sessions for this user
-        await supabase
-          .from("telegram_sessions")
-          .delete()
-          .eq("user_id", userId);
-
         // Create new session in database
         const { data: session, error: insertError } = await supabase
           .from("telegram_sessions")
           .insert({
-            user_id: userId,
+            user_id: tempUserId,
             api_id: parseInt(apiId),
             api_hash: apiHash,
             phone_number: phoneNumber,

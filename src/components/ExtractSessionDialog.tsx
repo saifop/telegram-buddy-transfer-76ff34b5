@@ -71,19 +71,12 @@ export function ExtractSessionDialog({ onSessionExtracted }: ExtractSessionDialo
   };
 
   const handleSubmitCredentials = async () => {
-    // Move to phone step after validating credentials format
+    // Validate credentials format
     if (!apiId || !apiHash) {
-      return; // Error will be shown by the hook
+      return;
     }
-    // Just advance to phone step - actual API call happens when sending code
-    const success = await sendCode(apiId, apiHash, phoneNumber || "+0");
-    // If no phone yet, we need to get it first
-    if (!phoneNumber) {
-      // We'll call sendCode again after getting phone number
-      resetForm();
-      setApiId(apiId);
-      setApiHash(apiHash);
-    }
+    // Just advance to phone step visually - no API call yet
+    // The actual API call happens when user submits phone number
   };
 
   const handleSubmitPhone = async () => {
@@ -149,8 +142,8 @@ export function ExtractSessionDialog({ onSessionExtracted }: ExtractSessionDialo
     }
   };
 
-  // Determine which step to show in UI
-  const uiStep = step === "credentials" && apiId && apiHash ? "phone" : step;
+  // Show phone step if we have credentials but haven't started auth yet
+  const showPhoneStep = step === "credentials" && apiId && apiHash;
 
   return (
     <Dialog open={open} onOpenChange={handleOpenChange}>
@@ -190,7 +183,7 @@ export function ExtractSessionDialog({ onSessionExtracted }: ExtractSessionDialo
         )}
 
         {/* Step: Credentials */}
-        {step === "credentials" && (
+        {step === "credentials" && !showPhoneStep && (
           <div className="space-y-4">
             <div className="p-3 rounded-lg bg-muted/50 text-xs text-muted-foreground">
               <p className="font-medium mb-1">كيفية الحصول على API ID و Hash:</p>
@@ -236,7 +229,7 @@ export function ExtractSessionDialog({ onSessionExtracted }: ExtractSessionDialo
 
             <Button
               onClick={handleSubmitCredentials}
-              disabled={isLoading}
+              disabled={isLoading || !apiId || !apiHash}
               className="w-full"
             >
               {isLoading ? (
@@ -248,7 +241,7 @@ export function ExtractSessionDialog({ onSessionExtracted }: ExtractSessionDialo
         )}
 
         {/* Step: Phone */}
-        {step === "phone" && (
+        {(step === "phone" || showPhoneStep) && (
           <div className="space-y-4">
             <div className="space-y-2">
               <Label htmlFor="phone" className="flex items-center gap-2">

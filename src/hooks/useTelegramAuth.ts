@@ -39,21 +39,8 @@ export function useTelegramAuth(): UseTelegramAuthReturn {
     setPhoneNumber('');
   };
 
-  // Check if user is authenticated
-  const checkAuth = async (): Promise<boolean> => {
-    const { data: { session } } = await supabase.auth.getSession();
-    if (!session) {
-      setError('يجب تسجيل الدخول أولاً لاستخدام هذه الميزة');
-      return false;
-    }
-    return true;
-  };
 
   const sendCode = async (apiId: string, apiHash: string, phone: string): Promise<boolean> => {
-    // Check authentication first
-    if (!(await checkAuth())) {
-      return false;
-    }
 
     if (!apiId || !apiHash) {
       setError('يرجى إدخال API ID و API Hash');
