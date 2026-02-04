@@ -20,6 +20,9 @@ import {
   Square,
   Zap,
   RefreshCw,
+  Plus,
+  Trash2,
+  Infinity,
 } from "lucide-react";
 import { useAddMembers } from "@/hooks/useAddMembers";
 import { useAutoAddMembers } from "@/hooks/useAutoAddMembers";
@@ -87,8 +90,12 @@ export function AddMembersPanel({
     cooldownAfterFlood: 300,
   });
 
+  // Multiple source groups for auto mode
+  const [sourceGroups, setSourceGroups] = useState<string[]>([""]);
+  const [infiniteLoop, setInfiniteLoop] = useState(false);
+
   const [autoMode, setAutoMode] = useState(false);
-  const [autoProgress, setAutoProgress] = useState({ current: 0, total: 0, batch: 0 });
+  const [autoProgress, setAutoProgress] = useState({ current: 0, total: 0, batch: 0, groupIndex: 0, totalGroups: 0 });
   const [autoStats, setAutoStats] = useState({ totalAdded: 0, totalFailed: 0, totalSkipped: 0 });
 
   const { isRunning, isPaused, startAdding, pauseAdding, resumeAdding, stopAdding } = useAddMembers({
@@ -107,6 +114,7 @@ export function AddMembersPanel({
     isRunning: isAutoRunning,
     isPaused: isAutoPaused,
     currentBatch,
+    currentGroupIndex,
     startAutoAdd,
     pauseAutoAdd,
     resumeAutoAdd,
@@ -115,12 +123,13 @@ export function AddMembersPanel({
     accounts,
     settings: {
       targetGroup: settings.targetGroup,
-      sourceGroup: settings.sourceGroup,
+      sourceGroups: sourceGroups.filter(g => g.trim()),
       membersPerBatch: 50,
       delayMin: settings.delayMin,
       delayMax: settings.delayMax,
       delayBetweenBatches: 30,
       cooldownAfterFlood: settings.cooldownAfterFlood,
+      infiniteLoop: infiniteLoop,
     },
     addLog,
     onUpdateProgress: (p) => setAutoProgress(p),
@@ -135,6 +144,25 @@ export function AddMembersPanel({
       setAutoStats(stats);
     },
   });
+
+  // Helpers for source groups
+  const addSourceGroup = () => {
+    setSourceGroups([...sourceGroups, ""]);
+  };
+
+  const removeSourceGroup = (index: number) => {
+    if (sourceGroups.length > 1) {
+      setSourceGroups(sourceGroups.filter((_, i) => i !== index));
+    }
+  };
+
+  const updateSourceGroup = (index: number, value: string) => {
+    const updated = [...sourceGroups];
+    updated[index] = value;
+    setSourceGroups(updated);
+  };
+
+  const validSourceGroups = sourceGroups.filter(g => g.trim()).length;
 
   const selectedMembers = members.filter((m) => m.isSelected && m.status === "pending");
   const activeAccounts = accounts.filter((a) => a.isSelected && a.status === "connected");
@@ -162,21 +190,69 @@ export function AddMembersPanel({
       </CardHeader>
 
       <CardContent className="flex-1 overflow-auto space-y-5">
-        {/* Source Group */}
-        <div className="space-y-2">
-          <Label className="flex items-center gap-2">
-            <Users className="w-4 h-4" />
-            المجموعة المصدر (التي تم استخراج الأعضاء منها)
-          </Label>
-          <Input
-            placeholder="https://t.me/sourcegroup أو @sourcegroup"
-            value={settings.sourceGroup}
-            onChange={(e) => setSettings({ ...settings, sourceGroup: e.target.value })}
-            dir="ltr"
-            className="text-left"
-          />
-          <p className="text-xs text-muted-foreground">مطلوب للعثور على الأعضاء الذين ليس لديهم username</p>
-        </div>
+        {/* Source Groups - Show differently based on mode */}
+        {!autoMode ? (
+          // Single source group for manual mode
+          <div className="space-y-2">
+            <Label className="flex items-center gap-2">
+              <Users className="w-4 h-4" />
+              المجموعة المصدر (التي تم استخراج الأعضاء منها)
+            </Label>
+            <Input
+              placeholder="https://t.me/sourcegroup أو @sourcegroup"
+              value={settings.sourceGroup}
+              onChange={(e) => setSettings({ ...settings, sourceGroup: e.target.value })}
+              dir="ltr"
+              className="text-left"
+            />
+            <p className="text-xs text-muted-foreground">مطلوب للعثور على الأعضاء الذين ليس لديهم username</p>
+          </div>
+        ) : (
+          // Multiple source groups for auto mode
+          <div className="space-y-3">
+            <div className="flex items-center justify-between">
+              <Label className="flex items-center gap-2">
+                <Users className="w-4 h-4" />
+                كروبات المصدر ({validSourceGroups})
+              </Label>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={addSourceGroup}
+                className="gap-1"
+              >
+                <Plus className="w-3 h-3" />
+                إضافة كروب
+              </Button>
+            </div>
+            <div className="space-y-2 max-h-40 overflow-y-auto">
+              {sourceGroups.map((group, index) => (
+                <div key={index} className="flex gap-2">
+                  <Input
+                    placeholder={`كروب ${index + 1}: https://t.me/group أو @group`}
+                    value={group}
+                    onChange={(e) => updateSourceGroup(index, e.target.value)}
+                    dir="ltr"
+                    className="text-left flex-1"
+                  />
+                  {sourceGroups.length > 1 && (
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      onClick={() => removeSourceGroup(index)}
+                      className="shrink-0 text-destructive hover:text-destructive"
+                    >
+                      <Trash2 className="w-4 h-4" />
+                    </Button>
+                  )}
+                </div>
+              ))}
+            </div>
+            <p className="text-xs text-muted-foreground">
+              سيتم الاستخراج من كل كروب بالترتيب وإضافة الأعضاء للمجموعة المستهدفة
+            </p>
+          </div>
+        )}
 
         {/* Target Group */}
         <div className="space-y-2">
@@ -199,7 +275,7 @@ export function AddMembersPanel({
             <Zap className="w-4 h-4 text-primary" />
             <div>
               <Label className="text-sm font-medium">التشغيل التلقائي المستمر</Label>
-              <p className="text-xs text-muted-foreground">استخراج وإضافة تلقائي حتى اكتمال المجموعة</p>
+              <p className="text-xs text-muted-foreground">استخراج وإضافة تلقائي حتى اكتمال المجموعات</p>
             </div>
           </div>
           <Switch
@@ -209,6 +285,24 @@ export function AddMembersPanel({
           />
         </div>
 
+        {/* Infinite Loop Toggle - Only show in auto mode */}
+        {autoMode && (
+          <div className="flex items-center justify-between p-3 rounded-lg bg-accent/50 border">
+            <div className="flex items-center gap-2">
+              <Infinity className="w-4 h-4 text-primary" />
+              <div>
+                <Label className="text-sm font-medium">التشغيل اللانهائي</Label>
+                <p className="text-xs text-muted-foreground">يستمر بالمرور على الكروبات للأبد</p>
+              </div>
+            </div>
+            <Switch
+              checked={infiniteLoop}
+              onCheckedChange={setInfiniteLoop}
+              disabled={isAutoRunning}
+            />
+          </div>
+        )}
+
         {/* Control Buttons */}
         <div className="flex gap-2">
           {autoMode ? (
@@ -217,9 +311,10 @@ export function AddMembersPanel({
               <Button
                 onClick={startAutoAdd}
                 className="flex-1 gap-2 bg-gradient-to-r from-primary to-primary/80"
-                disabled={activeAccounts.length === 0 || !settings.targetGroup.trim() || !settings.sourceGroup.trim()}
+                disabled={activeAccounts.length === 0 || !settings.targetGroup.trim() || validSourceGroups === 0}
               >
                 <RefreshCw className="w-4 h-4" />
+                بدء التشغيل ({validSourceGroups} كروب)
                 بدء التشغيل التلقائي
               </Button>
             ) : (
@@ -297,40 +392,67 @@ export function AddMembersPanel({
               <div className="flex items-center gap-2">
                 <RefreshCw className="w-4 h-4 text-primary animate-spin" />
                 <span className="text-sm font-medium">التشغيل التلقائي</span>
+                {infiniteLoop && <Infinity className="w-3 h-3 text-primary" />}
               </div>
-              <Badge variant="outline" className="bg-primary/10">
-                الدفعة {currentBatch}
-              </Badge>
+              <div className="flex gap-2">
+                <Badge variant="outline" className="bg-primary/10">
+                  كروب {autoProgress.groupIndex + 1}/{autoProgress.totalGroups}
+                </Badge>
+                <Badge variant="outline" className="bg-primary/10">
+                  دفعة {currentBatch}
+                </Badge>
+              </div>
             </div>
             
-            <div className="flex items-center justify-between text-sm">
-              <span className="text-muted-foreground">التقدم في الدفعة:</span>
-              <span className="font-medium">
-                {autoProgress.current} / {autoProgress.total}
-              </span>
+            {/* Group Progress Bar */}
+            <div className="space-y-1">
+              <div className="flex items-center justify-between text-xs">
+                <span className="text-muted-foreground">تقدم الكروبات:</span>
+                <span className="font-medium">
+                  {autoProgress.groupIndex + 1} / {autoProgress.totalGroups}
+                </span>
+              </div>
+              <Progress 
+                value={autoProgress.totalGroups > 0 ? ((autoProgress.groupIndex + 1) / autoProgress.totalGroups) * 100 : 0} 
+                className="h-1.5" 
+              />
             </div>
-            <Progress 
-              value={autoProgress.total > 0 ? (autoProgress.current / autoProgress.total) * 100 : 0} 
-              className="h-2" 
-            />
+            
+            {/* Batch Progress Bar */}
+            <div className="space-y-1">
+              <div className="flex items-center justify-between text-xs">
+                <span className="text-muted-foreground">تقدم الدفعة:</span>
+                <span className="font-medium">
+                  {autoProgress.current} / {autoProgress.total}
+                </span>
+              </div>
+              <Progress 
+                value={autoProgress.total > 0 ? (autoProgress.current / autoProgress.total) * 100 : 0} 
+                className="h-1.5" 
+              />
+            </div>
             
             <div className="grid grid-cols-3 gap-2 text-xs">
-              <div className="text-center p-2 rounded bg-green-500/10">
-                <div className="font-bold text-green-600">{autoStats.totalAdded}</div>
+              <div className="text-center p-2 rounded bg-primary/10">
+                <div className="font-bold text-primary">{autoStats.totalAdded}</div>
                 <div className="text-muted-foreground">نجاح</div>
               </div>
-              <div className="text-center p-2 rounded bg-red-500/10">
-                <div className="font-bold text-red-600">{autoStats.totalFailed}</div>
+              <div className="text-center p-2 rounded bg-destructive/10">
+                <div className="font-bold text-destructive">{autoStats.totalFailed}</div>
                 <div className="text-muted-foreground">فشل</div>
               </div>
-              <div className="text-center p-2 rounded bg-yellow-500/10">
-                <div className="font-bold text-yellow-600">{autoStats.totalSkipped}</div>
+              <div className="text-center p-2 rounded bg-accent">
+                <div className="font-bold text-accent-foreground">{autoStats.totalSkipped}</div>
                 <div className="text-muted-foreground">تخطي</div>
               </div>
             </div>
             
             <p className="text-xs text-muted-foreground text-center">
-              {isAutoPaused ? "متوقف مؤقتاً" : "يستخرج ويضيف تلقائياً... سيتم إشعارك عند الاكتمال"}
+              {isAutoPaused 
+                ? "متوقف مؤقتاً" 
+                : infiniteLoop 
+                  ? "♾️ وضع لانهائي - يستمر للأبد..." 
+                  : "يستخرج ويضيف تلقائياً... سيتم إشعارك عند الاكتمال"}
             </p>
           </div>
         )}
