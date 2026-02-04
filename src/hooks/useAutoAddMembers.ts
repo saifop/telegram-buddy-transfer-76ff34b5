@@ -5,19 +5,20 @@ import type { TelegramAccount, LogEntry } from "@/pages/Index";
 
 interface AutoAddSettings {
   targetGroup: string;
-  sourceGroup: string;
+  sourceGroups: string[]; // Changed to array of source groups
   membersPerBatch: number;
   delayMin: number;
   delayMax: number;
-  delayBetweenBatches: number; // seconds between extraction batches
+  delayBetweenBatches: number;
   cooldownAfterFlood: number;
+  infiniteLoop: boolean; // New: loop forever through groups
 }
 
 interface UseAutoAddMembersProps {
   accounts: TelegramAccount[];
   settings: AutoAddSettings;
   addLog: (type: LogEntry["type"], message: string, accountPhone?: string) => void;
-  onUpdateProgress: (progress: { current: number; total: number; batch: number }) => void;
+  onUpdateProgress: (progress: { current: number; total: number; batch: number; groupIndex: number; totalGroups: number }) => void;
   onMembersExtracted: (members: Member[]) => void;
   onUpdateMemberStatus: (
     memberId: string,
@@ -49,10 +50,12 @@ export function useAutoAddMembers({
   const [isRunning, setIsRunning] = useState(false);
   const [isPaused, setIsPaused] = useState(false);
   const [currentBatch, setCurrentBatch] = useState(0);
+  const [currentGroupIndex, setCurrentGroupIndex] = useState(0);
   const abortRef = useRef(false);
   const pauseRef = useRef(false);
   const processedUserIdsRef = useRef<Set<string>>(new Set());
   const statsRef = useRef({ totalAdded: 0, totalFailed: 0, totalSkipped: 0 });
+  const loopCountRef = useRef(0);
 
   const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -116,6 +119,7 @@ export function useAutoAddMembers({
   // Extract members from source group
   const extractMembers = async (
     account: TelegramAccount,
+    sourceGroup: string,
     offset: number = 0
   ): Promise<{ members: Member[]; hasMore: boolean; error?: string }> => {
     try {
@@ -123,7 +127,7 @@ export function useAutoAddMembers({
         body: {
           action: "getGroupMembers",
           sessionString: account.sessionString,
-          groupLink: settings.sourceGroup,
+          groupLink: sourceGroup,
           apiId: account.apiId,
           apiHash: account.apiHash,
           limit: settings.membersPerBatch,
@@ -169,7 +173,8 @@ export function useAutoAddMembers({
   // Add a single member
   const addMember = async (
     member: Member,
-    account: TelegramAccount
+    account: TelegramAccount,
+    sourceGroup: string
   ): Promise<{ success: boolean; floodWait?: number; skip?: boolean; error?: string }> => {
     try {
       const { data, error } = await supabase.functions.invoke("telegram-auth", {
@@ -177,7 +182,7 @@ export function useAutoAddMembers({
           action: "addMemberToGroup",
           sessionString: account.sessionString,
           groupLink: settings.targetGroup,
-          sourceGroup: settings.sourceGroup,
+          sourceGroup: sourceGroup,
           userId: member.oderId,
           username: member.username,
           apiId: account.apiId,
@@ -227,8 +232,9 @@ export function useAutoAddMembers({
       return;
     }
 
-    if (!settings.sourceGroup.trim() || !settings.targetGroup.trim()) {
-      addLog("error", "يرجى تحديد المجموعة المصدر والمستهدفة");
+    const sourceGroups = settings.sourceGroups.filter(g => g.trim());
+    if (sourceGroups.length === 0 || !settings.targetGroup.trim()) {
+      addLog("error", "يرجى تحديد كروب مصدر واحد على الأقل والمجموعة المستهدفة");
       return;
     }
 
@@ -243,21 +249,21 @@ export function useAutoAddMembers({
     processedUserIdsRef.current.clear();
     statsRef.current = { totalAdded: 0, totalFailed: 0, totalSkipped: 0 };
     setCurrentBatch(0);
+    setCurrentGroupIndex(0);
+    loopCountRef.current = 0;
     onOperationStart();
 
-    // Step 1: Join groups
-    addLog("info", "جاري انضمام الحسابات للمجموعات...");
+    addLog("info", `🚀 بدء التشغيل التلقائي - ${sourceGroups.length} كروب مصدر`);
+
+    // Join target group first
+    addLog("info", "جاري انضمام الحسابات للمجموعة المستهدفة...");
     for (const account of activeAccounts) {
       if (abortRef.current) break;
-      
-      for (const group of [settings.sourceGroup, settings.targetGroup]) {
-        if (abortRef.current) break;
-        const result = await joinGroupWithAccount(account, group);
-        if (!result.success) {
-          addLog("warning", `${account.phone} - فشل الانضمام: ${result.error}`);
-        }
-        await sleep(2000);
+      const result = await joinGroupWithAccount(account, settings.targetGroup);
+      if (!result.success) {
+        addLog("warning", `${account.phone} - فشل الانضمام للمستهدفة: ${result.error}`);
       }
+      await sleep(2000);
     }
 
     if (abortRef.current) {
@@ -266,140 +272,178 @@ export function useAutoAddMembers({
       return;
     }
 
-    // Main loop: Extract → Add → Repeat
-    let batchNumber = 0;
-    let offset = 0;
-    let hasMoreMembers = true;
-    let accountIndex = 0;
-
-    while (hasMoreMembers && !abortRef.current) {
-      // Check pause
-      while (pauseRef.current && !abortRef.current) {
-        await sleep(500);
-      }
-      if (abortRef.current) break;
-
-      batchNumber++;
-      setCurrentBatch(batchNumber);
-      addLog("info", `=== الدفعة ${batchNumber} ===`);
-
-      // Get next available account for extraction
-      const extractAccount = activeAccounts[accountIndex % activeAccounts.length];
-      
-      addLog("info", `جاري استخراج الأعضاء (offset: ${offset})...`);
-      const extractResult = await extractMembers(extractAccount, offset);
-
-      if (extractResult.error) {
-        addLog("error", `فشل الاستخراج: ${extractResult.error}`);
-        // Try next account
-        accountIndex++;
-        if (accountIndex >= activeAccounts.length * 2) {
-          addLog("error", "فشل الاستخراج من جميع الحسابات");
-          break;
-        }
-        await sleep(10000);
-        continue;
+    // Main loop: iterate through all source groups
+    // Outer loop for infinite mode
+    do {
+      loopCountRef.current++;
+      if (loopCountRef.current > 1) {
+        addLog("info", `🔄 الدورة ${loopCountRef.current} - إعادة المرور على الكروبات`);
+        // Reset processed users for new loop (but keep stats)
+        processedUserIdsRef.current.clear();
       }
 
-      const members = extractResult.members;
-      hasMoreMembers = extractResult.hasMore;
-      offset += settings.membersPerBatch;
-
-      if (members.length === 0) {
-        if (hasMoreMembers) {
-          addLog("info", "لا يوجد أعضاء جدد في هذه الدفعة، متابعة...");
-          continue;
-        } else {
-          addLog("success", "تم الانتهاء من جميع الأعضاء!");
-          break;
+      // Loop through each source group
+      for (let groupIdx = 0; groupIdx < sourceGroups.length && !abortRef.current; groupIdx++) {
+        const currentSourceGroup = sourceGroups[groupIdx];
+        setCurrentGroupIndex(groupIdx);
+        
+        addLog("info", `📂 الكروب ${groupIdx + 1}/${sourceGroups.length}: ${currentSourceGroup}`);
+        
+        // Join this source group
+        for (const account of activeAccounts) {
+          if (abortRef.current) break;
+          const result = await joinGroupWithAccount(account, currentSourceGroup);
+          if (!result.success) {
+            addLog("warning", `${account.phone} - فشل الانضمام: ${result.error}`);
+          }
+          await sleep(1500);
         }
-      }
 
-      addLog("info", `تم استخراج ${members.length} عضو جديد`);
-      onMembersExtracted(members);
-
-      // Add members
-      let batchAdded = 0;
-      let batchFailed = 0;
-      let batchSkipped = 0;
-      let currentAccountIdx = 0;
-
-      for (let i = 0; i < members.length && !abortRef.current; i++) {
-        // Check pause
-        while (pauseRef.current && !abortRef.current) {
-          await sleep(500);
-        }
         if (abortRef.current) break;
 
-        const member = members[i];
-        
-        // Skip members without username
-        if (!member.username?.trim()) {
-          onUpdateMemberStatus(member.id, "failed", "لا يملك username");
-          batchSkipped++;
-          statsRef.current.totalSkipped++;
-          continue;
+        let batchNumber = 0;
+        let offset = 0;
+        let hasMoreMembers = true;
+        let accountIndex = 0;
+
+        // Process this source group
+        while (hasMoreMembers && !abortRef.current) {
+          // Check pause
+          while (pauseRef.current && !abortRef.current) {
+            await sleep(500);
+          }
+          if (abortRef.current) break;
+
+          batchNumber++;
+          setCurrentBatch(batchNumber);
+          addLog("info", `=== الكروب ${groupIdx + 1} - الدفعة ${batchNumber} ===`);
+
+          // Get next available account for extraction
+          const extractAccount = activeAccounts[accountIndex % activeAccounts.length];
+          
+          addLog("info", `جاري استخراج الأعضاء (offset: ${offset})...`);
+          const extractResult = await extractMembers(extractAccount, currentSourceGroup, offset);
+
+          if (extractResult.error) {
+            addLog("error", `فشل الاستخراج: ${extractResult.error}`);
+            accountIndex++;
+            if (accountIndex >= activeAccounts.length * 2) {
+              addLog("error", "فشل الاستخراج من جميع الحسابات - الانتقال للكروب التالي");
+              break;
+            }
+            await sleep(10000);
+            continue;
+          }
+
+          const members = extractResult.members;
+          hasMoreMembers = extractResult.hasMore;
+          offset += settings.membersPerBatch;
+
+          if (members.length === 0) {
+            if (hasMoreMembers) {
+              addLog("info", "لا يوجد أعضاء جدد في هذه الدفعة، متابعة...");
+              continue;
+            } else {
+              addLog("success", `✅ اكتمل الكروب ${groupIdx + 1}!`);
+              break;
+            }
+          }
+
+          addLog("info", `تم استخراج ${members.length} عضو جديد`);
+          onMembersExtracted(members);
+
+          // Add members
+          let batchAdded = 0;
+          let batchFailed = 0;
+          let batchSkipped = 0;
+          let currentAccountIdx = 0;
+
+          for (let i = 0; i < members.length && !abortRef.current; i++) {
+            // Check pause
+            while (pauseRef.current && !abortRef.current) {
+              await sleep(500);
+            }
+            if (abortRef.current) break;
+
+            const member = members[i];
+            
+            // Skip members without username
+            if (!member.username?.trim()) {
+              onUpdateMemberStatus(member.id, "failed", "لا يملك username");
+              batchSkipped++;
+              statsRef.current.totalSkipped++;
+              continue;
+            }
+
+            const account = activeAccounts[currentAccountIdx % activeAccounts.length];
+            
+            addLog("info", `إضافة: ${member.username}`, account.phone);
+            const result = await addMember(member, account, currentSourceGroup);
+
+            if (result.success) {
+              onUpdateMemberStatus(member.id, "added");
+              batchAdded++;
+              statsRef.current.totalAdded++;
+              addLog("success", `تمت إضافة: ${member.username}`, account.phone);
+            } else if (result.floodWait) {
+              onUpdateMemberStatus(member.id, "failed", result.error);
+              batchFailed++;
+              statsRef.current.totalFailed++;
+              addLog("warning", `Flood - انتظار ${result.floodWait} ثانية`, account.phone);
+              onUpdateAccountStatus?.(account.id, "flood", `انتظار ${result.floodWait}s`);
+              
+              await sleep(result.floodWait * 1000);
+              onUpdateAccountStatus?.(account.id, "connected");
+              
+              currentAccountIdx++;
+            } else if (result.skip) {
+              onUpdateMemberStatus(member.id, "failed", result.error);
+              batchSkipped++;
+              statsRef.current.totalSkipped++;
+              addLog("info", `تخطي: ${member.username} - ${result.error}`);
+            } else {
+              onUpdateMemberStatus(member.id, "failed", result.error);
+              batchFailed++;
+              statsRef.current.totalFailed++;
+              addLog("error", `فشل: ${member.username} - ${result.error}`);
+            }
+
+            onUpdateProgress({
+              current: i + 1,
+              total: members.length,
+              batch: batchNumber,
+              groupIndex: groupIdx,
+              totalGroups: sourceGroups.length,
+            });
+
+            const delay = getRandomDelay();
+            await sleep(delay * 1000);
+            
+            if ((i + 1) % 5 === 0) {
+              currentAccountIdx++;
+            }
+          }
+
+          addLog("info", `الدفعة ${batchNumber}: ${batchAdded} نجاح، ${batchFailed} فشل، ${batchSkipped} تخطي`);
+
+          if (hasMoreMembers && !abortRef.current) {
+            addLog("info", `انتظار ${settings.delayBetweenBatches} ثانية قبل الدفعة التالية...`);
+            await sleep(settings.delayBetweenBatches * 1000);
+          }
         }
 
-        const account = activeAccounts[currentAccountIdx % activeAccounts.length];
-        
-        addLog("info", `إضافة: ${member.username}`, account.phone);
-        const result = await addMember(member, account);
-
-        if (result.success) {
-          onUpdateMemberStatus(member.id, "added");
-          batchAdded++;
-          statsRef.current.totalAdded++;
-          addLog("success", `تمت إضافة: ${member.username}`, account.phone);
-        } else if (result.floodWait) {
-          onUpdateMemberStatus(member.id, "failed", result.error);
-          batchFailed++;
-          statsRef.current.totalFailed++;
-          addLog("warning", `Flood - انتظار ${result.floodWait} ثانية`, account.phone);
-          onUpdateAccountStatus?.(account.id, "flood", `انتظار ${result.floodWait}s`);
-          
-          // Wait for flood
-          await sleep(result.floodWait * 1000);
-          onUpdateAccountStatus?.(account.id, "connected");
-          
-          // Rotate to next account
-          currentAccountIdx++;
-        } else if (result.skip) {
-          onUpdateMemberStatus(member.id, "failed", result.error);
-          batchSkipped++;
-          statsRef.current.totalSkipped++;
-          addLog("info", `تخطي: ${member.username} - ${result.error}`);
-        } else {
-          onUpdateMemberStatus(member.id, "failed", result.error);
-          batchFailed++;
-          statsRef.current.totalFailed++;
-          addLog("error", `فشل: ${member.username} - ${result.error}`);
-        }
-
-        onUpdateProgress({
-          current: i + 1,
-          total: members.length,
-          batch: batchNumber,
-        });
-
-        // Delay between adds
-        const delay = getRandomDelay();
-        await sleep(delay * 1000);
-        
-        // Rotate accounts every few members
-        if ((i + 1) % 5 === 0) {
-          currentAccountIdx++;
+        // Delay between groups
+        if (groupIdx < sourceGroups.length - 1 && !abortRef.current) {
+          addLog("info", `⏳ انتظار 60 ثانية قبل الكروب التالي...`);
+          await sleep(60000);
         }
       }
 
-      addLog("info", `الدفعة ${batchNumber}: ${batchAdded} نجاح، ${batchFailed} فشل، ${batchSkipped} تخطي`);
-
-      // Delay between batches
-      if (hasMoreMembers && !abortRef.current) {
-        addLog("info", `انتظار ${settings.delayBetweenBatches} ثانية قبل الدفعة التالية...`);
-        await sleep(settings.delayBetweenBatches * 1000);
+      if (settings.infiniteLoop && !abortRef.current) {
+        addLog("info", `♾️ الوضع اللانهائي - انتظار 5 دقائق قبل الدورة التالية...`);
+        await sleep(300000); // 5 minutes between loops
       }
-    }
+    } while (settings.infiniteLoop && !abortRef.current);
 
     // Complete
     const finalStats = statsRef.current;
@@ -407,10 +451,9 @@ export function useAutoAddMembers({
     setIsPaused(false);
     onOperationEnd();
 
-    const message = `اكتملت العملية! الإجمالي: ${finalStats.totalAdded} نجاح، ${finalStats.totalFailed} فشل، ${finalStats.totalSkipped} تخطي`;
+    const message = `🎉 اكتملت العملية! الإجمالي: ${finalStats.totalAdded} نجاح، ${finalStats.totalFailed} فشل، ${finalStats.totalSkipped} تخطي`;
     addLog("success", message);
     
-    // Send notification
     sendNotification("🎉 اكتملت العملية!", message);
     
     onComplete(finalStats);
@@ -440,6 +483,7 @@ export function useAutoAddMembers({
     isRunning,
     isPaused,
     currentBatch,
+    currentGroupIndex,
     startAutoAdd,
     pauseAutoAdd,
     resumeAutoAdd,
