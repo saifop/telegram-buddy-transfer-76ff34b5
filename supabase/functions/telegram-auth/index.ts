@@ -120,50 +120,61 @@ Deno.serve(async (req) => {
           console.error("External service non-OK status:", response.status, data);
           
           // Extract user-friendly error message from the external service
-          const externalError = (data as { error?: string })?.error;
-          if (externalError) {
-          // Map common Telegram errors to user-friendly messages
-          if (externalError.includes("CHAT_WRITE_FORBIDDEN")) {
+          const rawExternalError = (data as { error?: unknown })?.error;
+          const externalError =
+            typeof rawExternalError === "string"
+              ? rawExternalError
+              : rawExternalError
+                ? JSON.stringify(rawExternalError)
+                : "";
+
+          // Some services wrap the Telegram error text inside other fields.
+          // Build a combined text to match against reliably.
+          const combinedErrorText = [externalError, JSON.stringify(data)].filter(Boolean).join("\n");
+
+          if (combinedErrorText) {
+            // Map common Telegram errors to user-friendly messages
+            if (combinedErrorText.includes("CHAT_WRITE_FORBIDDEN")) {
             return errorResponse("ليس لديك صلاحية إضافة أعضاء لهذه المجموعة. تأكد أنك مشرف.", 403);
           }
-          if (externalError.includes("USER_PRIVACY_RESTRICTED")) {
+            if (combinedErrorText.includes("USER_PRIVACY_RESTRICTED")) {
             return errorResponse("خصوصية المستخدم تمنع الإضافة", 403);
           }
-          if (externalError.includes("USER_NOT_MUTUAL_CONTACT")) {
+            if (combinedErrorText.includes("USER_NOT_MUTUAL_CONTACT")) {
             return errorResponse("يجب أن يكون المستخدم جهة اتصال متبادلة", 403);
           }
-          if (externalError.includes("PEER_FLOOD") || externalError.includes("FLOOD")) {
+            if (combinedErrorText.includes("PEER_FLOOD") || combinedErrorText.includes("FLOOD")) {
             // Try to extract wait time from error
-            const waitMatch = externalError.match(/FLOOD_WAIT[_\s]*(\d+)/i);
+              const waitMatch = combinedErrorText.match(/FLOOD_WAIT[_\s]*(\d+)/i);
             const waitSeconds = waitMatch ? waitMatch[1] : "60";
             return errorResponse(`تم تجاوز الحد المسموح. انتظر ${waitSeconds} ثانية قبل المحاولة`, 429);
           }
-          if (externalError.includes("CHAT_ADMIN_REQUIRED")) {
+            if (combinedErrorText.includes("CHAT_ADMIN_REQUIRED")) {
             return errorResponse("يجب أن تكون مشرفاً للإضافة", 403);
           }
-          if (externalError.includes("USER_ID_INVALID")) {
+            if (combinedErrorText.includes("USER_ID_INVALID")) {
             return errorResponse("لا يمكن التعرف على هذا المستخدم. تأكد من وجود username أو أن الحساب شاهد المستخدم مسبقاً", 400);
           }
-          if (externalError.includes("USER_NOT_PARTICIPANT")) {
+            if (combinedErrorText.includes("USER_NOT_PARTICIPANT")) {
             return errorResponse("المستخدم ليس عضواً في المجموعة المصدر", 400);
           }
-          if (externalError.includes("USER_ALREADY_PARTICIPANT")) {
+            if (combinedErrorText.includes("USER_ALREADY_PARTICIPANT")) {
             return errorResponse("المستخدم موجود مسبقاً في المجموعة المستهدفة", 400);
           }
-          if (externalError.includes("USER_CHANNELS_TOO_MUCH")) {
+            if (combinedErrorText.includes("USER_CHANNELS_TOO_MUCH")) {
             return errorResponse("العضو موجود في أكثر من 500 مجموعة (حد تيليجرام) - تم تخطيه", 400);
           }
-          if (externalError.includes("USERS_TOO_MUCH")) {
+            if (combinedErrorText.includes("USERS_TOO_MUCH")) {
             return errorResponse("المجموعة المستهدفة وصلت للحد الأقصى من الأعضاء", 400);
           }
-          if (externalError.includes("USER_BANNED_IN_CHANNEL")) {
+            if (combinedErrorText.includes("USER_BANNED_IN_CHANNEL")) {
             return errorResponse("العضو محظور من هذه المجموعة", 403);
           }
-          if (externalError.includes("USER_KICKED")) {
+            if (combinedErrorText.includes("USER_KICKED")) {
             return errorResponse("العضو مطرود من هذه المجموعة ولا يمكن إضافته", 403);
           }
           // Return the original error message if not mapped
-          return errorResponse(externalError, response.status);
+            return errorResponse(externalError || "Authentication service error", response.status);
           }
           
           return errorResponse("Authentication service error", 502);
