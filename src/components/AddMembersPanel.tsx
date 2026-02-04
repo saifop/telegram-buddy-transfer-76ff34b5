@@ -7,13 +7,6 @@ import { Slider } from "@/components/ui/slider";
 import { Switch } from "@/components/ui/switch";
 import { Progress } from "@/components/ui/progress";
 import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
-import {
   UserPlus,
   Clock,
   Users,
@@ -21,7 +14,11 @@ import {
   AlertTriangle,
   Settings2,
   Target,
+  Play,
+  Pause,
+  Square,
 } from "lucide-react";
+import { useAddMembers } from "@/hooks/useAddMembers";
 import type { Member } from "./MembersList";
 import type { TelegramAccount, LogEntry } from "@/pages/Index";
 
@@ -37,9 +34,11 @@ interface AddMembersPanelProps {
     status: Member["status"],
     errorMessage?: string
   ) => void;
+  onOperationStart: () => void;
+  onOperationEnd: () => void;
 }
 
-interface AddSettings {
+export interface AddSettings {
   targetGroup: string;
   membersPerAccount: number;
   delayMin: number;
@@ -54,11 +53,13 @@ interface AddSettings {
 export function AddMembersPanel({
   members,
   accounts,
-  isRunning,
+  isRunning: externalIsRunning,
   currentProgress,
   addLog,
   onUpdateProgress,
   onUpdateMemberStatus,
+  onOperationStart,
+  onOperationEnd,
 }: AddMembersPanelProps) {
   const [settings, setSettings] = useState<AddSettings>({
     targetGroup: "",
@@ -70,6 +71,17 @@ export function AddMembersPanel({
     rotateAccounts: true,
     maxRetries: 2,
     cooldownAfterFlood: 300,
+  });
+
+  const { isRunning, isPaused, startAdding, pauseAdding, resumeAdding, stopAdding } = useAddMembers({
+    members,
+    accounts,
+    settings,
+    addLog,
+    onUpdateProgress,
+    onUpdateMemberStatus,
+    onOperationStart,
+    onOperationEnd,
   });
 
   const selectedMembers = members.filter((m) => m.isSelected && m.status === "pending");
@@ -113,6 +125,38 @@ export function AddMembersPanel({
           />
         </div>
 
+        {/* Control Buttons */}
+        <div className="flex gap-2">
+          {!isRunning ? (
+            <Button
+              onClick={startAdding}
+              className="flex-1 gap-2 bg-green-600 hover:bg-green-700"
+              disabled={selectedMembers.length === 0 || activeAccounts.length === 0 || !settings.targetGroup.trim()}
+            >
+              <Play className="w-4 h-4" />
+              بدء الإضافة ({selectedMembers.length} عضو)
+            </Button>
+          ) : (
+            <>
+              {isPaused ? (
+                <Button onClick={resumeAdding} className="flex-1 gap-2">
+                  <Play className="w-4 h-4" />
+                  استئناف
+                </Button>
+              ) : (
+                <Button onClick={pauseAdding} variant="outline" className="flex-1 gap-2">
+                  <Pause className="w-4 h-4" />
+                  إيقاف مؤقت
+                </Button>
+              )}
+              <Button onClick={stopAdding} variant="destructive" className="gap-2">
+                <Square className="w-4 h-4" />
+                إيقاف
+              </Button>
+            </>
+          )}
+        </div>
+
         {/* Progress (when running) */}
         {isRunning && (
           <div className="p-4 rounded-lg bg-accent/50 border space-y-3">
@@ -124,7 +168,7 @@ export function AddMembersPanel({
             </div>
             <Progress value={progressPercent} className="h-2" />
             <p className="text-xs text-muted-foreground text-center">
-              جاري الإضافة... يرجى الانتظار
+              {isPaused ? "متوقف مؤقتاً" : "جاري الإضافة... يرجى الانتظار"}
             </p>
           </div>
         )}

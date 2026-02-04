@@ -284,6 +284,8 @@ const Index = () => {
                       addLog={addLog}
                       onUpdateProgress={setProgress}
                       onUpdateMemberStatus={handleUpdateMemberStatus}
+                      onOperationStart={() => setOperationStatus("running")}
+                      onOperationEnd={() => setOperationStatus("idle")}
                     />
                   </div>
 
