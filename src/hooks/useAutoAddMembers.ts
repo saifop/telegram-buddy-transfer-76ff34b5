@@ -5,13 +5,22 @@ import type { TelegramAccount, LogEntry } from "@/pages/Index";
 
 interface AutoAddSettings {
   targetGroup: string;
-  sourceGroups: string[]; // Changed to array of source groups
+  sourceGroups: string[];
   membersPerBatch: number;
   delayMin: number;
   delayMax: number;
   delayBetweenBatches: number;
   cooldownAfterFlood: number;
-  infiniteLoop: boolean; // New: loop forever through groups
+  infiniteLoop: boolean;
+}
+
+export interface SuccessfulMember {
+  id: string;
+  username?: string;
+  firstName?: string;
+  lastName?: string;
+  addedAt: string;
+  addedBy: string;
 }
 
 interface UseAutoAddMembersProps {
@@ -32,7 +41,7 @@ interface UseAutoAddMembersProps {
   ) => void;
   onOperationStart: () => void;
   onOperationEnd: () => void;
-  onComplete: (stats: { totalAdded: number; totalFailed: number; totalSkipped: number }) => void;
+  onComplete: (stats: { totalAdded: number; totalFailed: number; totalSkipped: number; successfulMembers: SuccessfulMember[] }) => void;
 }
 
 export function useAutoAddMembers({
@@ -51,11 +60,15 @@ export function useAutoAddMembers({
   const [isPaused, setIsPaused] = useState(false);
   const [currentBatch, setCurrentBatch] = useState(0);
   const [currentGroupIndex, setCurrentGroupIndex] = useState(0);
+  const [successfulMembers, setSuccessfulMembers] = useState<SuccessfulMember[]>([]);
   const abortRef = useRef(false);
   const pauseRef = useRef(false);
-  const processedUserIdsRef = useRef<Set<string>>(new Set());
+  const processedUserIdsRef = useRef<Set<string>>(new Set()); // Members already attempted
+  const addedUserIdsRef = useRef<Set<string>>(new Set()); // Successfully added members
   const statsRef = useRef({ totalAdded: 0, totalFailed: 0, totalSkipped: 0 });
+  const successfulMembersRef = useRef<SuccessfulMember[]>([]);
   const loopCountRef = useRef(0);
+  const currentAccountIndexRef = useRef(0); // For sequential account rotation
 
   const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -86,11 +99,34 @@ export function useAutoAddMembers({
     }
   };
 
+  // Get next available account (sequential rotation)
+  const getNextAccount = (activeAccounts: TelegramAccount[]): TelegramAccount | null => {
+    const availableAccounts = activeAccounts.filter(
+      (a) => a.status === "connected" && a.isSelected
+    );
+    
+    if (availableAccounts.length === 0) return null;
+    
+    const account = availableAccounts[currentAccountIndexRef.current % availableAccounts.length];
+    return account;
+  };
+
+  // Move to next account in rotation
+  const rotateToNextAccount = (activeAccounts: TelegramAccount[]) => {
+    const availableCount = activeAccounts.filter(
+      (a) => a.status === "connected" && a.isSelected
+    ).length;
+    
+    if (availableCount > 0) {
+      currentAccountIndexRef.current = (currentAccountIndexRef.current + 1) % availableCount;
+    }
+  };
+
   // Join a group with an account
   const joinGroupWithAccount = async (
     account: TelegramAccount,
     groupLink: string
-  ): Promise<{ success: boolean; error?: string }> => {
+  ): Promise<{ success: boolean; error?: string; banned?: boolean }> => {
     try {
       const { data, error } = await supabase.functions.invoke("telegram-auth", {
         body: {
@@ -103,7 +139,9 @@ export function useAutoAddMembers({
       });
 
       if (error) {
-        return { success: false, error: error.message };
+        const isBanned = error.message?.toLowerCase().includes("banned") || 
+                         error.message?.toLowerCase().includes("محظور");
+        return { success: false, error: error.message, banned: isBanned };
       }
 
       if (data?.success || data?.error?.includes("USER_ALREADY_PARTICIPANT")) {
@@ -175,7 +213,12 @@ export function useAutoAddMembers({
     member: Member,
     account: TelegramAccount,
     sourceGroup: string
-  ): Promise<{ success: boolean; floodWait?: number; skip?: boolean; error?: string }> => {
+  ): Promise<{ success: boolean; floodWait?: number; skip?: boolean; banned?: boolean; error?: string }> => {
+    // Skip if already added (prevent duplicate attempts)
+    if (addedUserIdsRef.current.has(member.oderId)) {
+      return { success: false, skip: true, error: "تمت إضافته مسبقاً" };
+    }
+
     try {
       const { data, error } = await supabase.functions.invoke("telegram-auth", {
         body: {
@@ -191,14 +234,39 @@ export function useAutoAddMembers({
       });
 
       if (error) {
-        return { success: false, error: error.message };
+        const isBanned = error.message?.toLowerCase().includes("banned") || 
+                         error.message?.toLowerCase().includes("محظور");
+        return { success: false, error: error.message, banned: isBanned };
       }
 
       if (data?.success) {
+        // Mark as successfully added
+        addedUserIdsRef.current.add(member.oderId);
+        
+        // Store successful member
+        const successMember: SuccessfulMember = {
+          id: member.oderId,
+          username: member.username,
+          firstName: member.firstName,
+          lastName: member.lastName,
+          addedAt: new Date().toISOString(),
+          addedBy: account.phone,
+        };
+        successfulMembersRef.current.push(successMember);
+        setSuccessfulMembers([...successfulMembersRef.current]);
+        
         return { success: true };
       }
 
       const errorMsg = data?.error || "";
+
+      // Check if banned
+      if (errorMsg.toLowerCase().includes("banned") || 
+          errorMsg.toLowerCase().includes("محظور") ||
+          errorMsg.includes("USER_BANNED") ||
+          errorMsg.includes("CHAT_WRITE_FORBIDDEN")) {
+        return { success: false, banned: true, error: errorMsg };
+      }
 
       // Flood wait
       if (errorMsg.toLowerCase().includes("flood") || errorMsg.includes("تم تجاوز الحد")) {
@@ -206,7 +274,7 @@ export function useAutoAddMembers({
         return { success: false, floodWait: waitSeconds, error: errorMsg };
       }
 
-      // Skippable errors
+      // Skippable errors (don't switch account for these)
       if (
         errorMsg.includes("USER_CHANNELS_TOO_MUCH") ||
         errorMsg.includes("500 مجموعة") ||
@@ -215,6 +283,8 @@ export function useAutoAddMembers({
         errorMsg.includes("موجود مسبقاً") ||
         errorMsg.includes("USER_ALREADY_PARTICIPANT")
       ) {
+        // Mark as processed to avoid re-trying
+        addedUserIdsRef.current.add(member.oderId);
         return { success: false, skip: true, error: errorMsg };
       }
 
@@ -247,7 +317,11 @@ export function useAutoAddMembers({
     abortRef.current = false;
     pauseRef.current = false;
     processedUserIdsRef.current.clear();
+    addedUserIdsRef.current.clear();
+    successfulMembersRef.current = [];
+    setSuccessfulMembers([]);
     statsRef.current = { totalAdded: 0, totalFailed: 0, totalSkipped: 0 };
+    currentAccountIndexRef.current = 0;
     setCurrentBatch(0);
     setCurrentGroupIndex(0);
     loopCountRef.current = 0;
@@ -352,11 +426,10 @@ export function useAutoAddMembers({
           addLog("info", `تم استخراج ${members.length} عضو جديد`);
           onMembersExtracted(members);
 
-          // Add members
+          // Add members - Sequential account rotation (one account at a time)
           let batchAdded = 0;
           let batchFailed = 0;
           let batchSkipped = 0;
-          let currentAccountIdx = 0;
 
           for (let i = 0; i < members.length && !abortRef.current; i++) {
             // Check pause
@@ -367,6 +440,13 @@ export function useAutoAddMembers({
 
             const member = members[i];
             
+            // Skip if already added (prevent duplicate attempts across all accounts)
+            if (addedUserIdsRef.current.has(member.oderId)) {
+              addLog("info", `تخطي: ${member.username || member.oderId} - تمت إضافته مسبقاً`);
+              batchSkipped++;
+              continue;
+            }
+            
             // Skip members without username
             if (!member.username?.trim()) {
               onUpdateMemberStatus(member.id, "failed", "لا يملك username");
@@ -375,7 +455,12 @@ export function useAutoAddMembers({
               continue;
             }
 
-            const account = activeAccounts[currentAccountIdx % activeAccounts.length];
+            // Get current account (sequential - one at a time)
+            let account = getNextAccount(activeAccounts);
+            if (!account) {
+              addLog("error", "لا يوجد حسابات متاحة للإضافة");
+              break;
+            }
             
             addLog("info", `إضافة: ${member.username}`, account.phone);
             const result = await addMember(member, account, currentSourceGroup);
@@ -385,19 +470,35 @@ export function useAutoAddMembers({
               batchAdded++;
               statsRef.current.totalAdded++;
               addLog("success", `تمت إضافة: ${member.username}`, account.phone);
+              
+              // Rotate to next account after successful add
+              rotateToNextAccount(activeAccounts);
+            } else if (result.banned) {
+              // Account is banned - deactivate and switch immediately
+              onUpdateAccountStatus?.(account.id, "banned", "محظور");
+              addLog("error", `⛔ الحساب ${account.phone} محظور - الانتقال للتالي`);
+              
+              // Remove from rotation by rotating
+              rotateToNextAccount(activeAccounts);
+              
+              // Retry this member with next account
+              i--;
+              await sleep(2000);
             } else if (result.floodWait) {
               onUpdateMemberStatus(member.id, "failed", result.error);
               batchFailed++;
               statsRef.current.totalFailed++;
-              addLog("warning", `Flood - انتظار ${result.floodWait} ثانية`, account.phone);
+              addLog("warning", `Flood - تخطي للحساب التالي`, account.phone);
               onUpdateAccountStatus?.(account.id, "flood", `انتظار ${result.floodWait}s`);
               
-              await sleep(result.floodWait * 1000);
-              onUpdateAccountStatus?.(account.id, "connected");
+              // Don't wait - just switch to next account
+              rotateToNextAccount(activeAccounts);
               
-              currentAccountIdx++;
+              // Retry with next account
+              i--;
+              await sleep(1000);
             } else if (result.skip) {
-              onUpdateMemberStatus(member.id, "failed", result.error);
+              onUpdateMemberStatus(member.id, "skipped", result.error);
               batchSkipped++;
               statsRef.current.totalSkipped++;
               addLog("info", `تخطي: ${member.username} - ${result.error}`);
@@ -406,6 +507,9 @@ export function useAutoAddMembers({
               batchFailed++;
               statsRef.current.totalFailed++;
               addLog("error", `فشل: ${member.username} - ${result.error}`);
+              
+              // On general error, try next account
+              rotateToNextAccount(activeAccounts);
             }
 
             onUpdateProgress({
@@ -418,10 +522,6 @@ export function useAutoAddMembers({
 
             const delay = getRandomDelay();
             await sleep(delay * 1000);
-            
-            if ((i + 1) % 5 === 0) {
-              currentAccountIdx++;
-            }
           }
 
           addLog("info", `الدفعة ${batchNumber}: ${batchAdded} نجاح، ${batchFailed} فشل، ${batchSkipped} تخطي`);
@@ -456,7 +556,7 @@ export function useAutoAddMembers({
     
     sendNotification("🎉 اكتملت العملية!", message);
     
-    onComplete(finalStats);
+    onComplete({ ...finalStats, successfulMembers: successfulMembersRef.current });
   }, [accounts, settings, addLog, onUpdateProgress, onMembersExtracted, onUpdateMemberStatus, onUpdateAccountStatus, onOperationStart, onOperationEnd, onComplete]);
 
   const pauseAutoAdd = useCallback(() => {
@@ -484,6 +584,7 @@ export function useAutoAddMembers({
     isPaused,
     currentBatch,
     currentGroupIndex,
+    successfulMembers,
     startAutoAdd,
     pauseAutoAdd,
     resumeAutoAdd,

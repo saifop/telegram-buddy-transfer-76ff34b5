@@ -23,9 +23,11 @@ import {
   Plus,
   Trash2,
   Infinity,
+  Download,
+  FileJson,
 } from "lucide-react";
 import { useAddMembers } from "@/hooks/useAddMembers";
-import { useAutoAddMembers } from "@/hooks/useAutoAddMembers";
+import { useAutoAddMembers, type SuccessfulMember } from "@/hooks/useAutoAddMembers";
 import type { Member } from "./MembersList";
 import type { TelegramAccount, LogEntry } from "@/pages/Index";
 
@@ -96,7 +98,12 @@ export function AddMembersPanel({
 
   const [autoMode, setAutoMode] = useState(false);
   const [autoProgress, setAutoProgress] = useState({ current: 0, total: 0, batch: 0, groupIndex: 0, totalGroups: 0 });
-  const [autoStats, setAutoStats] = useState({ totalAdded: 0, totalFailed: 0, totalSkipped: 0 });
+  const [autoStats, setAutoStats] = useState<{ totalAdded: number; totalFailed: number; totalSkipped: number; successfulMembers: SuccessfulMember[] }>({ 
+    totalAdded: 0, 
+    totalFailed: 0, 
+    totalSkipped: 0, 
+    successfulMembers: [] 
+  });
 
   const { isRunning, isPaused, startAdding, pauseAdding, resumeAdding, stopAdding } = useAddMembers({
     members,
@@ -115,6 +122,7 @@ export function AddMembersPanel({
     isPaused: isAutoPaused,
     currentBatch,
     currentGroupIndex,
+    successfulMembers: autoSuccessfulMembers,
     startAutoAdd,
     pauseAutoAdd,
     resumeAutoAdd,
@@ -454,6 +462,33 @@ export function AddMembersPanel({
                   ? "♾️ وضع لانهائي - يستمر للأبد..." 
                   : "يستخرج ويضيف تلقائياً... سيتم إشعارك عند الاكتمال"}
             </p>
+
+            {/* Download successful members button */}
+            {autoStats.successfulMembers.length > 0 && (
+              <Button
+                variant="outline"
+                size="sm"
+                className="w-full gap-2 bg-green-500/10 hover:bg-green-500/20 text-green-600"
+                onClick={() => {
+                  const data = {
+                    downloadedAt: new Date().toISOString(),
+                    totalSuccessful: autoStats.successfulMembers.length,
+                    members: autoStats.successfulMembers,
+                  };
+                  const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+                  const url = URL.createObjectURL(blob);
+                  const a = document.createElement("a");
+                  a.href = url;
+                  a.download = `successful-adds-${new Date().toISOString().split("T")[0]}.json`;
+                  a.click();
+                  URL.revokeObjectURL(url);
+                  addLog("success", `تم تحميل ${autoStats.successfulMembers.length} عضو ناجح`);
+                }}
+              >
+                <Download className="w-3 h-3" />
+                تنزيل الناجحين ({autoStats.successfulMembers.length})
+              </Button>
+            )}
           </div>
         )}
 
