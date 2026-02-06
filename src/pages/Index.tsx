@@ -11,6 +11,8 @@ import { ControlBar } from "@/components/ControlBar";
 import { MembersList, type Member } from "@/components/MembersList";
 import { AddMembersPanel } from "@/components/AddMembersPanel";
 import { ExtractMembersDialog } from "@/components/ExtractMembersDialog";
+import { ActiveMembersExtractor } from "@/components/ActiveMembersExtractor";
+import { ExtractedMembersFile } from "@/components/ExtractedMembersFile";
 
 export interface TelegramAccount {
   id: string;
@@ -309,11 +311,27 @@ const Index = () => {
                 <div className="h-full grid grid-cols-1 lg:grid-cols-3 gap-4">
                   {/* Left Panel - Members List */}
                   <div className="lg:col-span-1 overflow-hidden flex flex-col gap-3">
-                    <ExtractMembersDialog
-                      accounts={accounts}
-                      onMembersExtracted={handleImportMembers}
+                    {/* Extraction Buttons */}
+                    <div className="flex gap-2 flex-wrap">
+                      <ExtractMembersDialog
+                        accounts={accounts}
+                        onMembersExtracted={handleImportMembers}
+                        addLog={addLog}
+                      />
+                      <ActiveMembersExtractor
+                        accounts={accounts}
+                        onMembersExtracted={handleImportMembers}
+                        addLog={addLog}
+                      />
+                    </div>
+                    
+                    {/* Files Management */}
+                    <ExtractedMembersFile
+                      members={members}
+                      onImportMembers={handleImportMembers}
                       addLog={addLog}
                     />
+                    
                     <MembersList
                       members={members}
                       onToggleMember={handleToggleMember}
