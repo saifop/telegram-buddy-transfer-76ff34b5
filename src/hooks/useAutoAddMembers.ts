@@ -352,7 +352,6 @@ export function useAutoAddMembers({
       loopCountRef.current++;
       if (loopCountRef.current > 1) {
         addLog("info", `🔄 الدورة ${loopCountRef.current} - إعادة المرور على الكروبات`);
-        // Reset processed users for new loop (but keep stats)
         processedUserIdsRef.current.clear();
       }
 
@@ -375,162 +374,140 @@ export function useAutoAddMembers({
 
         if (abortRef.current) break;
 
-        let batchNumber = 0;
+        // === PHASE 1: Extract ALL members first ===
+        addLog("info", `📥 جاري استخراج جميع الأعضاء من الكروب...`);
         let offset = 0;
         let hasMoreMembers = true;
-        let accountIndex = 0;
+        let extractAccountIndex = 0;
+        const allGroupMembers: Member[] = [];
+        const groupSeenIds = new Set<string>();
 
-        // Process this source group
         while (hasMoreMembers && !abortRef.current) {
-          // Check pause
-          while (pauseRef.current && !abortRef.current) {
-            await sleep(500);
-          }
-          if (abortRef.current) break;
-
-          batchNumber++;
-          setCurrentBatch(batchNumber);
-          addLog("info", `=== الكروب ${groupIdx + 1} - الدفعة ${batchNumber} ===`);
-
-          // Get next available account for extraction
-          const extractAccount = activeAccounts[accountIndex % activeAccounts.length];
+          const extractAccount = activeAccounts[extractAccountIndex % activeAccounts.length];
           
-          addLog("info", `جاري استخراج الأعضاء (offset: ${offset})...`);
           const extractResult = await extractMembers(extractAccount, currentSourceGroup, offset);
 
           if (extractResult.error) {
-            addLog("error", `فشل الاستخراج: ${extractResult.error}`);
-            accountIndex++;
-            if (accountIndex >= activeAccounts.length * 2) {
-              addLog("error", "فشل الاستخراج من جميع الحسابات - الانتقال للكروب التالي");
+            addLog("warning", `فشل الاستخراج: ${extractResult.error}`);
+            extractAccountIndex++;
+            if (extractAccountIndex >= activeAccounts.length * 2) {
+              addLog("error", "فشل الاستخراج من جميع الحسابات");
               break;
             }
             await sleep(10000);
             continue;
           }
 
-          const members = extractResult.members;
+          // Deduplicate within this group extraction
+          for (const m of extractResult.members) {
+            if (!groupSeenIds.has(m.oderId) && !addedUserIdsRef.current.has(m.oderId)) {
+              groupSeenIds.add(m.oderId);
+              allGroupMembers.push(m);
+            }
+          }
+
           hasMoreMembers = extractResult.hasMore;
           offset += settings.membersPerBatch;
-
-          if (members.length === 0) {
-            if (hasMoreMembers) {
-              addLog("info", "لا يوجد أعضاء جدد في هذه الدفعة، متابعة...");
-              continue;
-            } else {
-              addLog("success", `✅ اكتمل الكروب ${groupIdx + 1}!`);
-              break;
-            }
-          }
-
-          addLog("info", `تم استخراج ${members.length} عضو جديد`);
-          onMembersExtracted(members);
-
-          // Add members - Sequential account rotation (one account at a time)
-          let batchAdded = 0;
-          let batchFailed = 0;
-          let batchSkipped = 0;
-
-          for (let i = 0; i < members.length && !abortRef.current; i++) {
-            // Check pause
-            while (pauseRef.current && !abortRef.current) {
-              await sleep(500);
-            }
-            if (abortRef.current) break;
-
-            const member = members[i];
-            
-            // Skip if already added (prevent duplicate attempts across all accounts)
-            if (addedUserIdsRef.current.has(member.oderId)) {
-              addLog("info", `تخطي: ${member.username || member.oderId} - تمت إضافته مسبقاً`);
-              batchSkipped++;
-              continue;
-            }
-            
-            // Skip members without username
-            if (!member.username?.trim()) {
-              onUpdateMemberStatus(member.id, "failed", "لا يملك username");
-              batchSkipped++;
-              statsRef.current.totalSkipped++;
-              continue;
-            }
-
-            // Get current account (sequential - one at a time)
-            let account = getNextAccount(activeAccounts);
-            if (!account) {
-              addLog("error", "لا يوجد حسابات متاحة للإضافة");
-              break;
-            }
-            
-            addLog("info", `إضافة: ${member.username}`, account.phone);
-            const result = await addMember(member, account, currentSourceGroup);
-
-            if (result.success) {
-              onUpdateMemberStatus(member.id, "added");
-              batchAdded++;
-              statsRef.current.totalAdded++;
-              addLog("success", `تمت إضافة: ${member.username}`, account.phone);
-              
-              // Rotate to next account after successful add
-              rotateToNextAccount(activeAccounts);
-            } else if (result.banned) {
-              // Account is banned - deactivate and switch immediately
-              onUpdateAccountStatus?.(account.id, "banned", "محظور");
-              addLog("error", `⛔ الحساب ${account.phone} محظور - الانتقال للتالي`);
-              
-              // Remove from rotation by rotating
-              rotateToNextAccount(activeAccounts);
-              
-              // Retry this member with next account
-              i--;
-              await sleep(2000);
-            } else if (result.floodWait) {
-              onUpdateMemberStatus(member.id, "failed", result.error);
-              batchFailed++;
-              statsRef.current.totalFailed++;
-              addLog("warning", `Flood - تخطي للحساب التالي`, account.phone);
-              onUpdateAccountStatus?.(account.id, "flood", `انتظار ${result.floodWait}s`);
-              
-              // Don't wait - just switch to next account
-              rotateToNextAccount(activeAccounts);
-              
-              // Retry with next account
-              i--;
-              await sleep(1000);
-            } else if (result.skip) {
-              onUpdateMemberStatus(member.id, "skipped", result.error);
-              batchSkipped++;
-              statsRef.current.totalSkipped++;
-              addLog("info", `تخطي: ${member.username} - ${result.error}`);
-            } else {
-              onUpdateMemberStatus(member.id, "failed", result.error);
-              batchFailed++;
-              statsRef.current.totalFailed++;
-              addLog("error", `فشل: ${member.username} - ${result.error}`);
-              
-              // On general error, try next account
-              rotateToNextAccount(activeAccounts);
-            }
-
-            onUpdateProgress({
-              current: i + 1,
-              total: members.length,
-              batch: batchNumber,
-              groupIndex: groupIdx,
-              totalGroups: sourceGroups.length,
-            });
-
-            const delay = getRandomDelay();
-            await sleep(delay * 1000);
-          }
-
-          addLog("info", `الدفعة ${batchNumber}: ${batchAdded} نجاح، ${batchFailed} فشل، ${batchSkipped} تخطي`);
-
-          if (hasMoreMembers && !abortRef.current) {
-            addLog("info", `انتظار ${settings.delayBetweenBatches} ثانية قبل الدفعة التالية...`);
-            await sleep(settings.delayBetweenBatches * 1000);
-          }
+          
+          addLog("info", `تم استخراج ${allGroupMembers.length} عضو فريد حتى الآن...`);
+          await sleep(2000);
         }
+
+        if (abortRef.current) break;
+        
+        if (allGroupMembers.length === 0) {
+          addLog("warning", `لا يوجد أعضاء جدد في الكروب ${groupIdx + 1}`);
+          continue;
+        }
+
+        addLog("success", `✅ اكتمل الاستخراج: ${allGroupMembers.length} عضو فريد`);
+        onMembersExtracted(allGroupMembers);
+
+        // === PHASE 2: Add ALL extracted members ===
+        addLog("info", `📤 بدء إضافة ${allGroupMembers.length} عضو...`);
+        let batchAdded = 0;
+        let batchFailed = 0;
+        let batchSkipped = 0;
+
+        for (let i = 0; i < allGroupMembers.length && !abortRef.current; i++) {
+          // Check pause
+          while (pauseRef.current && !abortRef.current) {
+            await sleep(500);
+          }
+          if (abortRef.current) break;
+
+          const member = allGroupMembers[i];
+          
+          // Skip if already added
+          if (addedUserIdsRef.current.has(member.oderId)) {
+            batchSkipped++;
+            continue;
+          }
+          
+          // Skip members without username
+          if (!member.username?.trim()) {
+            onUpdateMemberStatus(member.id, "failed", "لا يملك username");
+            batchSkipped++;
+            statsRef.current.totalSkipped++;
+            continue;
+          }
+
+          let account = getNextAccount(activeAccounts);
+          if (!account) {
+            addLog("error", "لا يوجد حسابات متاحة للإضافة");
+            break;
+          }
+          
+          addLog("info", `إضافة: ${member.username}`, account.phone);
+          const result = await addMember(member, account, currentSourceGroup);
+
+          if (result.success) {
+            onUpdateMemberStatus(member.id, "added");
+            batchAdded++;
+            statsRef.current.totalAdded++;
+            addLog("success", `تمت إضافة: ${member.username}`, account.phone);
+            rotateToNextAccount(activeAccounts);
+          } else if (result.banned) {
+            onUpdateAccountStatus?.(account.id, "banned", "محظور");
+            addLog("error", `⛔ الحساب ${account.phone} محظور - الانتقال للتالي`);
+            rotateToNextAccount(activeAccounts);
+            i--;
+            await sleep(2000);
+          } else if (result.floodWait) {
+            onUpdateMemberStatus(member.id, "failed", result.error);
+            batchFailed++;
+            statsRef.current.totalFailed++;
+            addLog("warning", `Flood - تخطي للحساب التالي`, account.phone);
+            onUpdateAccountStatus?.(account.id, "flood", `انتظار ${result.floodWait}s`);
+            rotateToNextAccount(activeAccounts);
+            i--;
+            await sleep(1000);
+          } else if (result.skip) {
+            onUpdateMemberStatus(member.id, "skipped", result.error);
+            batchSkipped++;
+            statsRef.current.totalSkipped++;
+            addLog("info", `تخطي: ${member.username} - ${result.error}`);
+          } else {
+            onUpdateMemberStatus(member.id, "failed", result.error);
+            batchFailed++;
+            statsRef.current.totalFailed++;
+            addLog("error", `فشل: ${member.username} - ${result.error}`);
+            rotateToNextAccount(activeAccounts);
+          }
+
+          onUpdateProgress({
+            current: i + 1,
+            total: allGroupMembers.length,
+            batch: 1,
+            groupIndex: groupIdx,
+            totalGroups: sourceGroups.length,
+          });
+
+          const delay = getRandomDelay();
+          await sleep(delay * 1000);
+        }
+
+        addLog("info", `الكروب ${groupIdx + 1}: ${batchAdded} نجاح، ${batchFailed} فشل، ${batchSkipped} تخطي`);
 
         // Delay between groups
         if (groupIdx < sourceGroups.length - 1 && !abortRef.current) {
