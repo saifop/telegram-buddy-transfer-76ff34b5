@@ -127,19 +127,27 @@ export function ExtractMembersDialog({
       }
 
       if (data?.members && Array.isArray(data.members)) {
-        const members: ExtractedMember[] = data.members.map((m: any, index: number) => ({
-          id: crypto.randomUUID(),
-          oderId: m.id?.toString() || String(index),
-          username: m.username,
-          firstName: m.first_name || m.firstName,
-          lastName: m.last_name || m.lastName,
-          phone: m.phone,
-          isSelected: true,
-        }));
+        // Deduplicate by user ID
+        const seenIds = new Set<string>();
+        const members: ExtractedMember[] = [];
+        for (const m of data.members) {
+          const oderId = m.id?.toString() || "";
+          if (oderId && seenIds.has(oderId)) continue;
+          if (oderId) seenIds.add(oderId);
+          members.push({
+            id: crypto.randomUUID(),
+            oderId,
+            username: m.username,
+            firstName: m.first_name || m.firstName,
+            lastName: m.last_name || m.lastName,
+            phone: m.phone,
+            isSelected: true,
+          });
+        }
 
         setExtractedMembers(members);
         setStep("preview");
-        addLog("success", `تم استخراج ${members.length} عضو من المجموعة`);
+        addLog("success", `تم استخراج ${members.length} عضو من المجموعة (بدون تكرار)`);
       } else {
         // Demo mode - generate sample members for testing
         const sampleMembers: ExtractedMember[] = Array.from({ length: 25 }, (_, i) => ({

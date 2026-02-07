@@ -1,8 +1,8 @@
 import { useState, useEffect } from "react";
 import { PasswordGate } from "@/components/PasswordGate";
-import { SidebarProvider } from "@/components/ui/sidebar";
+
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { AppSidebar } from "@/components/AppSidebar";
+
 import { SessionManager } from "@/components/SessionManager";
 import { AccountsList } from "@/components/AccountsList";
 import { OperationsPanel } from "@/components/OperationsPanel";
@@ -172,8 +172,17 @@ const Index = () => {
   };
 
   const handleImportMembers = (newMembers: Member[]) => {
-    setMembers((prev) => [...prev, ...newMembers]);
-    addLog("success", `تم استيراد ${newMembers.length} عضو`);
+    setMembers((prev) => {
+      const existingIds = new Set(prev.map((m) => m.oderId));
+      const uniqueNew = newMembers.filter((m) => !existingIds.has(m.oderId));
+      if (uniqueNew.length < newMembers.length) {
+        addLog("info", `تم تجاهل ${newMembers.length - uniqueNew.length} عضو مكرر`);
+      }
+      if (uniqueNew.length > 0) {
+        addLog("success", `تم استيراد ${uniqueNew.length} عضو جديد`);
+      }
+      return [...prev, ...uniqueNew];
+    });
   };
 
   const handleExportMembers = () => {
@@ -233,9 +242,7 @@ const Index = () => {
   };
 
   return (
-    <SidebarProvider>
-      <div className="min-h-screen flex w-full bg-background" dir="rtl">
-        <AppSidebar />
+    <div className="min-h-screen flex w-full bg-background" dir="rtl">
 
         <main className="flex-1 flex flex-col overflow-hidden">
           {/* Header */}
@@ -370,7 +377,6 @@ const Index = () => {
           </div>
         </main>
       </div>
-    </SidebarProvider>
   );
 };
 
