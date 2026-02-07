@@ -99,70 +99,98 @@ export function ExtractMembersDialog({
     }
   };
 
+  const [extractionStatus, setExtractionStatus] = useState("");
+
   const extractMembers = async (account: TelegramAccount) => {
     setStep("extracting");
     setIsLoading(true);
     setProgress(0);
+    setExtractionStatus("بدء الاستخراج...");
 
     try {
-      addLog("info", `جاري استخراج الأعضاء من: ${sourceGroup}`);
+      addLog("info", `جاري استخراج جميع الأعضاء من: ${sourceGroup}`);
 
-      // Call the edge function to extract members - use getGroupMembers action
-      const { data, error: funcError } = await supabase.functions.invoke("telegram-auth", {
-        body: {
-          action: "getGroupMembers",
-          sessionString: account.sessionString,
-          groupLink: sourceGroup,
-          apiId: account.apiId,
-          apiHash: account.apiHash,
-        },
-      });
+      const seenIds = new Set<string>();
+      const allMembers: ExtractedMember[] = [];
+      let offset = 0;
+      const limit = 200;
+      let hasMore = true;
+      let batchNum = 0;
 
-      if (funcError) throw funcError;
+      while (hasMore) {
+        batchNum++;
+        setExtractionStatus(`جاري جلب الدفعة ${batchNum}... (تم جمع ${allMembers.length} عضو)`);
 
-      // Simulate progress
-      for (let i = 0; i <= 100; i += 10) {
-        setProgress(i);
-        await new Promise((r) => setTimeout(r, 200));
-      }
+        const { data, error: funcError } = await supabase.functions.invoke("telegram-auth", {
+          body: {
+            action: "getGroupMembers",
+            sessionString: account.sessionString,
+            groupLink: sourceGroup,
+            apiId: account.apiId,
+            apiHash: account.apiHash,
+            offset,
+            limit,
+          },
+        });
 
-      if (data?.members && Array.isArray(data.members)) {
-        // Deduplicate by user ID
-        const seenIds = new Set<string>();
-        const members: ExtractedMember[] = [];
-        for (const m of data.members) {
-          const oderId = m.id?.toString() || "";
-          if (oderId && seenIds.has(oderId)) continue;
-          if (oderId) seenIds.add(oderId);
-          members.push({
+        if (funcError) throw funcError;
+
+        if (data?.members && Array.isArray(data.members) && data.members.length > 0) {
+          let newInBatch = 0;
+          for (const m of data.members) {
+            const oderId = m.id?.toString() || "";
+            if (!oderId || seenIds.has(oderId)) continue;
+            seenIds.add(oderId);
+            newInBatch++;
+            allMembers.push({
+              id: crypto.randomUUID(),
+              oderId,
+              username: m.username,
+              firstName: m.first_name || m.firstName,
+              lastName: m.last_name || m.lastName,
+              phone: m.phone,
+              isSelected: true,
+            });
+          }
+
+          addLog("info", `الدفعة ${batchNum}: ${data.members.length} عضو (${newInBatch} جديد، المجموع: ${allMembers.length})`);
+
+          // If we got fewer than limit or no new members, we're done
+          if (data.members.length < limit || newInBatch === 0) {
+            hasMore = false;
+          } else {
+            offset += limit;
+            // Small delay to avoid rate limiting
+            await new Promise((r) => setTimeout(r, 1000));
+          }
+
+          // Update progress (estimate based on batch growth)
+          setProgress(Math.min(95, batchNum * 15));
+        } else if (batchNum === 1 && (!data?.members || data.members.length === 0)) {
+          // Demo mode on first batch with no data
+          const sampleMembers: ExtractedMember[] = Array.from({ length: 25 }, (_, i) => ({
             id: crypto.randomUUID(),
-            oderId,
-            username: m.username,
-            firstName: m.first_name || m.firstName,
-            lastName: m.last_name || m.lastName,
-            phone: m.phone,
+            oderId: String(1000 + i),
+            username: `user_${Math.random().toString(36).substring(7)}`,
+            firstName: ["أحمد", "محمد", "علي", "حسن", "فاطمة", "زينب", "مريم"][i % 7],
+            lastName: ["العلي", "الحسن", "المحمد", "السعيد", "الكريم"][i % 5],
             isSelected: true,
-          });
+          }));
+          setExtractedMembers(sampleMembers);
+          setStep("preview");
+          setProgress(100);
+          addLog("info", `وضع التجربة: تم إنشاء ${sampleMembers.length} عضو للعرض`);
+          return;
+        } else {
+          hasMore = false;
         }
-
-        setExtractedMembers(members);
-        setStep("preview");
-        addLog("success", `تم استخراج ${members.length} عضو من المجموعة (بدون تكرار)`);
-      } else {
-        // Demo mode - generate sample members for testing
-        const sampleMembers: ExtractedMember[] = Array.from({ length: 25 }, (_, i) => ({
-          id: crypto.randomUUID(),
-          oderId: String(1000 + i),
-          username: `user_${Math.random().toString(36).substring(7)}`,
-          firstName: ["أحمد", "محمد", "علي", "حسن", "فاطمة", "زينب", "مريم"][i % 7],
-          lastName: ["العلي", "الحسن", "المحمد", "السعيد", "الكريم"][i % 5],
-          isSelected: true,
-        }));
-
-        setExtractedMembers(sampleMembers);
-        setStep("preview");
-        addLog("info", `وضع التجربة: تم إنشاء ${sampleMembers.length} عضو للعرض`);
       }
+
+      setProgress(100);
+      setExtractedMembers(allMembers);
+      setStep("preview");
+      setExtractionStatus("");
+      addLog("success", `تم استخراج ${allMembers.length} عضو فريد من المجموعة (${batchNum} دفعة)`);
     } catch (err: any) {
       console.error("Extraction error:", err);
       setError(err.message || "فشل في استخراج الأعضاء");
@@ -301,13 +329,15 @@ export function ExtractMembersDialog({
             <div className="space-y-4 text-center py-4">
               <Loader2 className="w-12 h-12 mx-auto animate-spin text-primary" />
               <div>
-                <p className="font-medium">جاري استخراج الأعضاء...</p>
+                <p className="font-medium">جاري استخراج جميع الأعضاء...</p>
                 <p className="text-sm text-muted-foreground mt-1">
                   من: {sourceGroup}
                 </p>
+                {extractionStatus && (
+                  <p className="text-xs text-muted-foreground mt-2">{extractionStatus}</p>
+                )}
               </div>
               <Progress value={progress} className="h-2" />
-              <p className="text-sm text-muted-foreground">{progress}%</p>
             </div>
           )}
 
