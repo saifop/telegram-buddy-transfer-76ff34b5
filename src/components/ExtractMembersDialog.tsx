@@ -104,93 +104,67 @@ export function ExtractMembersDialog({
   const extractMembers = async (account: TelegramAccount) => {
     setStep("extracting");
     setIsLoading(true);
-    setProgress(0);
-    setExtractionStatus("بدء الاستخراج...");
+    setProgress(30);
+    setExtractionStatus("جاري استخراج جميع الأعضاء دفعة واحدة...");
 
     try {
       addLog("info", `جاري استخراج جميع الأعضاء من: ${sourceGroup}`);
 
-      const seenIds = new Set<string>();
-      const allMembers: ExtractedMember[] = [];
-      let offset = 0;
-      const limit = 200;
-      let hasMore = true;
-      let batchNum = 0;
+      const { data, error: funcError } = await supabase.functions.invoke("telegram-auth", {
+        body: {
+          action: "getGroupMembers",
+          sessionString: account.sessionString,
+          groupLink: sourceGroup,
+          apiId: account.apiId,
+          apiHash: account.apiHash,
+          offset: 0,
+          limit: 10000,
+        },
+      });
 
-      while (hasMore) {
-        batchNum++;
-        setExtractionStatus(`جاري جلب الدفعة ${batchNum}... (تم جمع ${allMembers.length} عضو)`);
+      if (funcError) throw funcError;
 
-        const { data, error: funcError } = await supabase.functions.invoke("telegram-auth", {
-          body: {
-            action: "getGroupMembers",
-            sessionString: account.sessionString,
-            groupLink: sourceGroup,
-            apiId: account.apiId,
-            apiHash: account.apiHash,
-            offset,
-            limit,
-          },
-        });
+      setProgress(80);
 
-        if (funcError) throw funcError;
+      if (data?.members && Array.isArray(data.members) && data.members.length > 0) {
+        const seenIds = new Set<string>();
+        const uniqueMembers: ExtractedMember[] = [];
 
-        if (data?.members && Array.isArray(data.members) && data.members.length > 0) {
-          let newInBatch = 0;
-          for (const m of data.members) {
-            const oderId = m.id?.toString() || "";
-            if (!oderId || seenIds.has(oderId)) continue;
-            seenIds.add(oderId);
-            newInBatch++;
-            allMembers.push({
-              id: crypto.randomUUID(),
-              oderId,
-              username: m.username,
-              firstName: m.first_name || m.firstName,
-              lastName: m.last_name || m.lastName,
-              phone: m.phone,
-              isSelected: true,
-            });
-          }
-
-          addLog("info", `الدفعة ${batchNum}: ${data.members.length} عضو (${newInBatch} جديد، المجموع: ${allMembers.length})`);
-
-          // If we got fewer than limit or no new members, we're done
-          if (data.members.length < limit || newInBatch === 0) {
-            hasMore = false;
-          } else {
-            offset += limit;
-            // Small delay to avoid rate limiting
-            await new Promise((r) => setTimeout(r, 1000));
-          }
-
-          // Update progress (estimate based on batch growth)
-          setProgress(Math.min(95, batchNum * 15));
-        } else if (batchNum === 1 && (!data?.members || data.members.length === 0)) {
-          // Demo mode on first batch with no data
-          const sampleMembers: ExtractedMember[] = Array.from({ length: 25 }, (_, i) => ({
+        for (const m of data.members) {
+          const oderId = m.id?.toString() || "";
+          if (!oderId || seenIds.has(oderId)) continue;
+          seenIds.add(oderId);
+          uniqueMembers.push({
             id: crypto.randomUUID(),
-            oderId: String(1000 + i),
-            username: `user_${Math.random().toString(36).substring(7)}`,
-            firstName: ["أحمد", "محمد", "علي", "حسن", "فاطمة", "زينب", "مريم"][i % 7],
-            lastName: ["العلي", "الحسن", "المحمد", "السعيد", "الكريم"][i % 5],
+            oderId,
+            username: m.username,
+            firstName: m.first_name || m.firstName,
+            lastName: m.last_name || m.lastName,
+            phone: m.phone,
             isSelected: true,
-          }));
-          setExtractedMembers(sampleMembers);
-          setStep("preview");
-          setProgress(100);
-          addLog("info", `وضع التجربة: تم إنشاء ${sampleMembers.length} عضو للعرض`);
-          return;
-        } else {
-          hasMore = false;
+          });
         }
-      }
 
-      setProgress(100);
-      setExtractedMembers(allMembers);
-      setStep("preview");
-      setExtractionStatus("");
-      addLog("success", `تم استخراج ${allMembers.length} عضو فريد من المجموعة (${batchNum} دفعة)`);
+        setProgress(100);
+        setExtractedMembers(uniqueMembers);
+        setStep("preview");
+        setExtractionStatus("");
+        addLog("success", `تم استخراج ${uniqueMembers.length} عضو فريد من المجموعة`);
+      } else {
+        // Demo mode
+        const sampleMembers: ExtractedMember[] = Array.from({ length: 25 }, (_, i) => ({
+          id: crypto.randomUUID(),
+          oderId: String(1000 + i),
+          username: `user_${Math.random().toString(36).substring(7)}`,
+          firstName: ["أحمد", "محمد", "علي", "حسن", "فاطمة", "زينب", "مريم"][i % 7],
+          lastName: ["العلي", "الحسن", "المحمد", "السعيد", "الكريم"][i % 5],
+          isSelected: true,
+        }));
+        setExtractedMembers(sampleMembers);
+        setStep("preview");
+        setProgress(100);
+        addLog("info", `وضع التجربة: تم إنشاء ${sampleMembers.length} عضو للعرض`);
+      }
     } catch (err: any) {
       console.error("Extraction error:", err);
       setError(err.message || "فشل في استخراج الأعضاء");
