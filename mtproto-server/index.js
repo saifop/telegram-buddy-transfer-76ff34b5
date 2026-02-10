@@ -497,32 +497,76 @@ async function handleGetGroupMembers({ sessionString, groupLink, apiId, apiHash 
       return res.status(400).json({ error: 'Invalid group link' });
     }
     
-    console.log(`Getting members from group: ${value}`);
+    console.log(`Getting ALL members from group: ${value}`);
     
     // Get the channel/group entity
     const entity = await client.getEntity(value);
     
-    // Get participants
-    const participants = await client.getParticipants(entity, {
-      limit: 200, // Limit to avoid rate limits
-    });
+    // Fetch ALL participants using pagination loop
+    const allMembers = [];
+    const seenIds = new Set();
+    let offset = 0;
+    const batchSize = 200;
+    let batchNum = 0;
     
-    const members = participants.map(p => ({
-      id: p.id?.toString(),
-      username: p.username || '',
-      firstName: p.firstName || '',
-      lastName: p.lastName || '',
-      phone: p.phone || '',
-    }));
+    while (true) {
+      batchNum++;
+      console.log(`Fetching batch ${batchNum} (offset: ${offset})...`);
+      
+      const participants = await client.invoke(
+        new Api.channels.GetParticipants({
+          channel: entity,
+          filter: new Api.ChannelParticipantsRecent({}),
+          offset: offset,
+          limit: batchSize,
+          hash: BigInt(0),
+        })
+      );
+      
+      const users = participants.users || [];
+      
+      if (users.length === 0) {
+        console.log(`Batch ${batchNum}: no more users, stopping.`);
+        break;
+      }
+      
+      let newCount = 0;
+      for (const p of users) {
+        const oderId = p.id?.toString();
+        if (!oderId || seenIds.has(oderId)) continue;
+        seenIds.add(oderId);
+        newCount++;
+        allMembers.push({
+          id: oderId,
+          username: p.username || '',
+          firstName: p.firstName || '',
+          lastName: p.lastName || '',
+          phone: p.phone || '',
+        });
+      }
+      
+      console.log(`Batch ${batchNum}: ${users.length} returned, ${newCount} new, total: ${allMembers.length}`);
+      
+      // Stop if we got fewer than batchSize (end of list)
+      if (users.length < batchSize) break;
+      
+      // Stop if no new unique users found
+      if (newCount === 0) break;
+      
+      offset += users.length;
+      
+      // Small delay to avoid FLOOD
+      await new Promise(r => setTimeout(r, 1500));
+    }
     
     await client.disconnect();
     
-    console.log(`Extracted ${members.length} members from ${value}`);
+    console.log(`Extracted ${allMembers.length} total unique members from ${value} in ${batchNum} batches`);
     
     return res.json({
       success: true,
-      members,
-      count: members.length,
+      members: allMembers,
+      count: allMembers.length,
     });
 
   } catch (error) {

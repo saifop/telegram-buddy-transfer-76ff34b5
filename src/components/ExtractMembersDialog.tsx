@@ -106,94 +106,57 @@ export function ExtractMembersDialog({
     setIsLoading(true);
     setProgress(0);
 
-    const seenIds = new Set<string>();
-    const allMembers: ExtractedMember[] = [];
-    let offset = 0;
-    const batchSize = 200;
-    let batchNum = 0;
-
     try {
       addLog("info", `جاري استخراج جميع الأعضاء من: ${sourceGroup}`);
+      setExtractionStatus("جاري جلب جميع الأعضاء من السيرفر...");
 
-      while (true) {
-        batchNum++;
-        setExtractionStatus(`جاري جلب الدفعة ${batchNum}... تم جمع ${allMembers.length} عضو حتى الآن`);
+      const { data, error: funcError } = await supabase.functions.invoke("telegram-auth", {
+        body: {
+          action: "getGroupMembers",
+          sessionString: account.sessionString,
+          groupLink: sourceGroup,
+          apiId: account.apiId,
+          apiHash: account.apiHash,
+        },
+      });
 
-        const { data, error: funcError } = await supabase.functions.invoke("telegram-auth", {
-          body: {
-            action: "getGroupMembers",
-            sessionString: account.sessionString,
-            groupLink: sourceGroup,
-            apiId: account.apiId,
-            apiHash: account.apiHash,
-            offset,
-            limit: batchSize,
-          },
+      if (funcError) throw funcError;
+
+      const members = data?.members;
+      if (!members || !Array.isArray(members) || members.length === 0) {
+        setError("لم يتم العثور على أعضاء في المجموعة");
+        setStep("error");
+        return;
+      }
+
+      // Deduplicate just in case
+      const seenIds = new Set<string>();
+      const uniqueMembers: ExtractedMember[] = [];
+      for (const m of members) {
+        const oderId = m.id?.toString() || "";
+        if (!oderId || seenIds.has(oderId)) continue;
+        seenIds.add(oderId);
+        uniqueMembers.push({
+          id: crypto.randomUUID(),
+          oderId,
+          username: m.username,
+          firstName: m.first_name || m.firstName,
+          lastName: m.last_name || m.lastName,
+          phone: m.phone,
+          isSelected: true,
         });
-
-        if (funcError) throw funcError;
-
-        const members = data?.members;
-        if (!members || !Array.isArray(members) || members.length === 0) {
-          // No more members returned — done
-          break;
-        }
-
-        let newInBatch = 0;
-        for (const m of members) {
-          const oderId = m.id?.toString() || "";
-          if (!oderId || seenIds.has(oderId)) continue;
-          seenIds.add(oderId);
-          newInBatch++;
-          allMembers.push({
-            id: crypto.randomUUID(),
-            oderId,
-            username: m.username,
-            firstName: m.first_name || m.firstName,
-            lastName: m.last_name || m.lastName,
-            phone: m.phone,
-            isSelected: true,
-          });
-        }
-
-        addLog("info", `الدفعة ${batchNum}: ${members.length} عضو (${newInBatch} جديد) — الإجمالي: ${allMembers.length}`);
-
-        // If we got fewer than batchSize, we've reached the end
-        if (members.length < batchSize) break;
-
-        // If no new unique members were found, also stop
-        if (newInBatch === 0) break;
-
-        offset += members.length;
-        setProgress(Math.min(90, batchNum * 10));
-
-        // Small delay to avoid rate limiting
-        await new Promise((r) => setTimeout(r, 1500));
       }
 
       setProgress(100);
       setExtractionStatus("");
-
-      if (allMembers.length > 0) {
-        setExtractedMembers(allMembers);
-        setStep("preview");
-        addLog("success", `تم استخراج ${allMembers.length} عضو فريد من المجموعة (${batchNum} دفعة)`);
-      } else {
-        setError("لم يتم العثور على أعضاء في المجموعة");
-        setStep("error");
-      }
+      setExtractedMembers(uniqueMembers);
+      setStep("preview");
+      addLog("success", `تم استخراج ${uniqueMembers.length} عضو فريد من المجموعة`);
     } catch (err: any) {
       console.error("Extraction error:", err);
-      // If we already collected some members, show them anyway
-      if (allMembers.length > 0) {
-        setExtractedMembers(allMembers);
-        setStep("preview");
-        addLog("warning", `توقف الاستخراج بعد ${allMembers.length} عضو: ${err.message}`);
-      } else {
-        setError(err.message || "فشل في استخراج الأعضاء");
-        setStep("error");
-        addLog("error", `فشل استخراج الأعضاء: ${err.message}`);
-      }
+      setError(err.message || "فشل في استخراج الأعضاء");
+      setStep("error");
+      addLog("error", `فشل استخراج الأعضاء: ${err.message}`);
     } finally {
       setIsLoading(false);
     }
