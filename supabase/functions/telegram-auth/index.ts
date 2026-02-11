@@ -111,12 +111,15 @@ Deno.serve(async (req) => {
         }).finally(() => clearTimeout(timeoutId));
 
         // Try to parse JSON; if service returns non-JSON, surface a clear error
+        const rawText = await response.text();
         let data: unknown = null;
         try {
-          data = await response.json();
+          data = rawText ? JSON.parse(rawText) : null;
         } catch {
+          const snippet = rawText?.slice(0, 500) || "(empty response body)";
+          console.error("External service returned non-JSON:", response.status, snippet);
           return errorResponse(
-            "Authentication service returned an invalid response",
+            `Authentication service returned an invalid response (HTTP ${response.status}). Body: ${snippet}`,
             502,
           );
         }
