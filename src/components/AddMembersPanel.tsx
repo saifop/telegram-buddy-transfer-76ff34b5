@@ -200,11 +200,11 @@ export function AddMembersPanel({
       <CardContent className="flex-1 overflow-auto space-y-5">
         {/* Source Groups - Show differently based on mode */}
         {!autoMode ? (
-          // Single source group for manual mode
+          // Single source group for manual mode (optional)
           <div className="space-y-2">
             <Label className="flex items-center gap-2">
               <Users className="w-4 h-4" />
-              المجموعة المصدر (التي تم استخراج الأعضاء منها)
+              المجموعة المصدر (اختياري)
             </Label>
             <Input
               placeholder="https://t.me/sourcegroup أو @sourcegroup"
@@ -213,7 +213,9 @@ export function AddMembersPanel({
               dir="ltr"
               className="text-left"
             />
-            <p className="text-xs text-muted-foreground">مطلوب للعثور على الأعضاء الذين ليس لديهم username</p>
+            <p className="text-xs text-muted-foreground">
+              اتركه فارغاً إذا رفعت قائمة أعضاء جاهزة. مطلوب فقط للعثور على أعضاء بدون username
+            </p>
           </div>
         ) : (
           // Multiple source groups for auto mode
