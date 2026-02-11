@@ -160,18 +160,18 @@ Deno.serve(async (req) => {
           if (combinedErrorText) {
             // Map common Telegram errors to user-friendly messages
             // IMPORTANT: These are *expected* operational failures; return HTTP 200 to avoid UI "blank screen".
-            if (combinedErrorText.includes("CHAT_WRITE_FORBIDDEN")) {
+            // Match BOTH English Telegram error codes AND Arabic translations from Railway.
+            if (combinedErrorText.includes("CHAT_WRITE_FORBIDDEN") || combinedErrorText.includes("صلاحية")) {
               return errorResponse("ليس لديك صلاحية إضافة أعضاء لهذه المجموعة. تأكد أنك مشرف.", 403, true);
             }
-            if (combinedErrorText.includes("USER_PRIVACY_RESTRICTED")) {
+            if (combinedErrorText.includes("USER_PRIVACY_RESTRICTED") || combinedErrorText.includes("خصوصية")) {
               return errorResponse("خصوصية المستخدم تمنع الإضافة", 403, true);
             }
-            if (combinedErrorText.includes("USER_NOT_MUTUAL_CONTACT")) {
+            if (combinedErrorText.includes("USER_NOT_MUTUAL_CONTACT") || combinedErrorText.includes("جهة اتصال متبادلة")) {
               return errorResponse("يجب أن يكون المستخدم جهة اتصال متبادلة", 400, true);
             }
-            if (combinedErrorText.includes("PEER_FLOOD") || combinedErrorText.includes("FLOOD")) {
-              // Try to extract wait time from error
-              const waitMatch = combinedErrorText.match(/FLOOD_WAIT[_\s]*(\d+)/i);
+            if (combinedErrorText.includes("PEER_FLOOD") || combinedErrorText.includes("FLOOD") || combinedErrorText.includes("تم تجاوز الحد")) {
+              const waitMatch = combinedErrorText.match(/FLOOD_WAIT[_\s]*(\d+)/i) || combinedErrorText.match(/(\d+)\s*ثانية/);
               const waitSeconds = waitMatch ? waitMatch[1] : "60";
               return errorResponse(
                 `تم تجاوز الحد المسموح. انتظر ${waitSeconds} ثانية قبل المحاولة`,
@@ -179,7 +179,7 @@ Deno.serve(async (req) => {
                 true,
               );
             }
-            if (combinedErrorText.includes("CHAT_ADMIN_REQUIRED")) {
+            if (combinedErrorText.includes("CHAT_ADMIN_REQUIRED") || combinedErrorText.includes("مشرفاً")) {
               return errorResponse("يجب أن تكون مشرفاً للإضافة", 403, true);
             }
             if (combinedErrorText.includes("USER_ID_INVALID")) {
@@ -192,10 +192,10 @@ Deno.serve(async (req) => {
             if (combinedErrorText.includes("USER_NOT_PARTICIPANT")) {
               return errorResponse("المستخدم ليس عضواً في المجموعة المصدر", 400, true);
             }
-            if (combinedErrorText.includes("USER_ALREADY_PARTICIPANT")) {
+            if (combinedErrorText.includes("USER_ALREADY_PARTICIPANT") || combinedErrorText.includes("موجود مسبقاً")) {
               return errorResponse("المستخدم موجود مسبقاً في المجموعة المستهدفة", 400, true);
             }
-            if (combinedErrorText.includes("USER_CHANNELS_TOO_MUCH")) {
+            if (combinedErrorText.includes("USER_CHANNELS_TOO_MUCH") || combinedErrorText.includes("500 مجموعة")) {
               return errorResponse(
                 "العضو موجود في أكثر من 500 مجموعة (حد تيليجرام) - تم تخطيه",
                 400,
@@ -205,28 +205,26 @@ Deno.serve(async (req) => {
             if (combinedErrorText.includes("USERS_TOO_MUCH")) {
               return errorResponse("المجموعة المستهدفة وصلت للحد الأقصى من الأعضاء", 400, true);
             }
-            if (combinedErrorText.includes("USER_BANNED_IN_CHANNEL")) {
+            if (combinedErrorText.includes("USER_BANNED_IN_CHANNEL") || combinedErrorText.includes("محظور")) {
               return errorResponse("العضو محظور من هذه المجموعة", 403, true);
             }
-            if (combinedErrorText.includes("USER_KICKED")) {
+            if (combinedErrorText.includes("USER_KICKED") || combinedErrorText.includes("مطرود")) {
               return errorResponse("العضو مطرود من هذه المجموعة ولا يمكن إضافته", 403, true);
             }
 
-            // Fallback: for upstream 4xx, treat as expected and return 200
+            // Fallback: ALL non-OK upstream responses return HTTP 200 to prevent blank screen
             const fallbackMsg =
               externalError ||
               externalMessage ||
               `Authentication service error (HTTP ${response.status})`;
-            const isUpstreamClientError = response.status >= 400 && response.status < 500;
-            return errorResponse(fallbackMsg, response.status, isUpstreamClientError);
+            return errorResponse(fallbackMsg, response.status, true);
           }
 
-          // If upstream returned nothing useful but still a 4xx, don't crash the UI
-          const isUpstreamClientError = response.status >= 400 && response.status < 500;
+          // If upstream returned nothing useful, still return HTTP 200 to prevent blank screen
           return errorResponse(
             `Authentication service error (HTTP ${response.status})`,
             response.status,
-            isUpstreamClientError,
+            true,
           );
         }
 
