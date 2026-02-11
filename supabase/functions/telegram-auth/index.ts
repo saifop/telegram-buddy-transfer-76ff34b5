@@ -53,10 +53,16 @@ const validateUUID = (uuid: string): boolean => {
 };
 
 // Generic error response
-function errorResponse(message: string, status: number = 400) {
+function errorResponse(message: string, status: number = 400, forceOk: boolean = false) {
+  // NOTE:
+  // - supabase-js treats non-2xx as FunctionsHttpError and many UIs surface it as a "runtime error"
+  // - For expected Telegram/business-rule failures (privacy, flood wait, not mutual contact, ...)
+  //   we return HTTP 200 and include the intended status in the JSON payload.
+  const httpStatus = forceOk ? 200 : status;
+
   return new Response(
-    JSON.stringify({ error: message }),
-    { status, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+    JSON.stringify({ error: message, status }),
+    { status: httpStatus, headers: { ...corsHeaders, "Content-Type": "application/json" } },
   );
 }
 
@@ -153,14 +159,15 @@ Deno.serve(async (req) => {
 
           if (combinedErrorText) {
             // Map common Telegram errors to user-friendly messages
+            // IMPORTANT: These are *expected* operational failures; return HTTP 200 to avoid UI "blank screen".
             if (combinedErrorText.includes("CHAT_WRITE_FORBIDDEN")) {
-              return errorResponse("ليس لديك صلاحية إضافة أعضاء لهذه المجموعة. تأكد أنك مشرف.", 403);
+              return errorResponse("ليس لديك صلاحية إضافة أعضاء لهذه المجموعة. تأكد أنك مشرف.", 403, true);
             }
             if (combinedErrorText.includes("USER_PRIVACY_RESTRICTED")) {
-              return errorResponse("خصوصية المستخدم تمنع الإضافة", 403);
+              return errorResponse("خصوصية المستخدم تمنع الإضافة", 403, true);
             }
             if (combinedErrorText.includes("USER_NOT_MUTUAL_CONTACT")) {
-              return errorResponse("يجب أن يكون المستخدم جهة اتصال متبادلة", 403);
+              return errorResponse("يجب أن يكون المستخدم جهة اتصال متبادلة", 400, true);
             }
             if (combinedErrorText.includes("PEER_FLOOD") || combinedErrorText.includes("FLOOD")) {
               // Try to extract wait time from error
@@ -169,47 +176,58 @@ Deno.serve(async (req) => {
               return errorResponse(
                 `تم تجاوز الحد المسموح. انتظر ${waitSeconds} ثانية قبل المحاولة`,
                 429,
+                true,
               );
             }
             if (combinedErrorText.includes("CHAT_ADMIN_REQUIRED")) {
-              return errorResponse("يجب أن تكون مشرفاً للإضافة", 403);
+              return errorResponse("يجب أن تكون مشرفاً للإضافة", 403, true);
             }
             if (combinedErrorText.includes("USER_ID_INVALID")) {
               return errorResponse(
                 "لا يمكن التعرف على هذا المستخدم. تأكد من وجود username أو أن الحساب شاهد المستخدم مسبقاً",
                 400,
+                true,
               );
             }
             if (combinedErrorText.includes("USER_NOT_PARTICIPANT")) {
-              return errorResponse("المستخدم ليس عضواً في المجموعة المصدر", 400);
+              return errorResponse("المستخدم ليس عضواً في المجموعة المصدر", 400, true);
             }
             if (combinedErrorText.includes("USER_ALREADY_PARTICIPANT")) {
-              return errorResponse("المستخدم موجود مسبقاً في المجموعة المستهدفة", 400);
+              return errorResponse("المستخدم موجود مسبقاً في المجموعة المستهدفة", 400, true);
             }
             if (combinedErrorText.includes("USER_CHANNELS_TOO_MUCH")) {
               return errorResponse(
                 "العضو موجود في أكثر من 500 مجموعة (حد تيليجرام) - تم تخطيه",
                 400,
+                true,
               );
             }
             if (combinedErrorText.includes("USERS_TOO_MUCH")) {
-              return errorResponse("المجموعة المستهدفة وصلت للحد الأقصى من الأعضاء", 400);
+              return errorResponse("المجموعة المستهدفة وصلت للحد الأقصى من الأعضاء", 400, true);
             }
             if (combinedErrorText.includes("USER_BANNED_IN_CHANNEL")) {
-              return errorResponse("العضو محظور من هذه المجموعة", 403);
+              return errorResponse("العضو محظور من هذه المجموعة", 403, true);
             }
             if (combinedErrorText.includes("USER_KICKED")) {
-              return errorResponse("العضو مطرود من هذه المجموعة ولا يمكن إضافته", 403);
+              return errorResponse("العضو مطرود من هذه المجموعة ولا يمكن إضافته", 403, true);
             }
 
-            // Fallback: return upstream details with status
-            return errorResponse(
-              externalError || externalMessage || `Authentication service error (HTTP ${response.status})`,
-              response.status,
-            );
+            // Fallback: for upstream 4xx, treat as expected and return 200
+            const fallbackMsg =
+              externalError ||
+              externalMessage ||
+              `Authentication service error (HTTP ${response.status})`;
+            const isUpstreamClientError = response.status >= 400 && response.status < 500;
+            return errorResponse(fallbackMsg, response.status, isUpstreamClientError);
           }
 
-          return errorResponse(`Authentication service error (HTTP ${response.status})`, 502);
+          // If upstream returned nothing useful but still a 4xx, don't crash the UI
+          const isUpstreamClientError = response.status >= 400 && response.status < 500;
+          return errorResponse(
+            `Authentication service error (HTTP ${response.status})`,
+            response.status,
+            isUpstreamClientError,
+          );
         }
 
         return successResponse(data as object);
