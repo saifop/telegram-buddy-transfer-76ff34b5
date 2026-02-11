@@ -329,23 +329,6 @@ export function useAutoAddMembers({
 
     addLog("info", `🚀 بدء التشغيل التلقائي - ${sourceGroups.length} كروب مصدر`);
 
-    // Join target group first
-    addLog("info", "جاري انضمام الحسابات للمجموعة المستهدفة...");
-    for (const account of activeAccounts) {
-      if (abortRef.current) break;
-      const result = await joinGroupWithAccount(account, settings.targetGroup);
-      if (!result.success) {
-        addLog("warning", `${account.phone} - فشل الانضمام للمستهدفة: ${result.error}`);
-      }
-      await sleep(2000);
-    }
-
-    if (abortRef.current) {
-      setIsRunning(false);
-      onOperationEnd();
-      return;
-    }
-
     // Main loop: iterate through all source groups
     // Outer loop for infinite mode
     do {
@@ -361,40 +344,41 @@ export function useAutoAddMembers({
         setCurrentGroupIndex(groupIdx);
         
         addLog("info", `📂 الكروب ${groupIdx + 1}/${sourceGroups.length}: ${currentSourceGroup}`);
-        
-        // Join this source group
-        for (const account of activeAccounts) {
-          if (abortRef.current) break;
-          const result = await joinGroupWithAccount(account, currentSourceGroup);
-          if (!result.success) {
-            addLog("warning", `${account.phone} - فشل الانضمام: ${result.error}`);
-          }
-          await sleep(1500);
-        }
 
-        if (abortRef.current) break;
-
-        // === PHASE 1: Extract ALL members first ===
+        // === PHASE 1: Extract ALL members - one account joins and extracts ===
         addLog("info", `📥 جاري استخراج جميع الأعضاء من الكروب...`);
         let offset = 0;
         let hasMoreMembers = true;
         let extractAccountIndex = 0;
         const allGroupMembers: Member[] = [];
         const groupSeenIds = new Set<string>();
+        let extractResult_lastFailed = false;
 
         while (hasMoreMembers && !abortRef.current) {
           const extractAccount = activeAccounts[extractAccountIndex % activeAccounts.length];
           
+          // Join source group with this account only (first time or after failure)
+          if (extractAccountIndex === 0 || extractResult_lastFailed) {
+            addLog("info", `انضمام ${extractAccount.phone} للكروب المصدر...`);
+            const joinResult = await joinGroupWithAccount(extractAccount, currentSourceGroup);
+            if (!joinResult.success) {
+              addLog("warning", `${extractAccount.phone} - فشل الانضمام: ${joinResult.error}`);
+            }
+            await sleep(1500);
+          }
+          
           const extractResult = await extractMembers(extractAccount, currentSourceGroup, offset);
+          extractResult_lastFailed = false;
 
           if (extractResult.error) {
             addLog("warning", `فشل الاستخراج: ${extractResult.error}`);
             extractAccountIndex++;
-            if (extractAccountIndex >= activeAccounts.length * 2) {
+            extractResult_lastFailed = true;
+            if (extractAccountIndex >= activeAccounts.length) {
               addLog("error", "فشل الاستخراج من جميع الحسابات");
               break;
             }
-            await sleep(10000);
+            await sleep(5000);
             continue;
           }
 
@@ -428,8 +412,10 @@ export function useAutoAddMembers({
         let batchAdded = 0;
         let batchFailed = 0;
         let batchSkipped = 0;
+        let memberRetryCount = 0; // Safety: max retries per member = number of accounts
 
         for (let i = 0; i < allGroupMembers.length && !abortRef.current; i++) {
+          memberRetryCount = 0; // Reset for each new member
           // Check pause
           while (pauseRef.current && !abortRef.current) {
             await sleep(500);
@@ -468,31 +454,52 @@ export function useAutoAddMembers({
             addLog("success", `تمت إضافة: ${member.username}`, account.phone);
             rotateToNextAccount(activeAccounts);
           } else if (result.banned) {
-            onUpdateAccountStatus?.(account.id, "banned", "محظور");
-            addLog("error", `⛔ الحساب ${account.phone} محظور - الانتقال للتالي`);
-            rotateToNextAccount(activeAccounts);
-            i--;
-            await sleep(2000);
+            memberRetryCount++;
+            if (memberRetryCount >= activeAccounts.length) {
+              onUpdateMemberStatus(member.id, "failed", "كل الحسابات محظورة");
+              batchFailed++;
+              statsRef.current.totalFailed++;
+              addLog("error", `❌ فشل إضافة ${member.username} - كل الحسابات غير متاحة`);
+            } else {
+              onUpdateAccountStatus?.(account.id, "banned", "محظور");
+              addLog("error", `⛔ ${account.phone} محظور - إعادة محاولة العضو بالحساب التالي`);
+              rotateToNextAccount(activeAccounts);
+              i--; // retry same member
+              await sleep(2000);
+            }
           } else if (result.floodWait) {
-            onUpdateMemberStatus(member.id, "failed", result.error);
-            batchFailed++;
-            statsRef.current.totalFailed++;
-            addLog("warning", `Flood - تخطي للحساب التالي`, account.phone);
-            onUpdateAccountStatus?.(account.id, "flood", `انتظار ${result.floodWait}s`);
-            rotateToNextAccount(activeAccounts);
-            i--;
-            await sleep(1000);
+            memberRetryCount++;
+            if (memberRetryCount >= activeAccounts.length) {
+              onUpdateMemberStatus(member.id, "failed", "كل الحسابات مقيدة");
+              batchFailed++;
+              statsRef.current.totalFailed++;
+              addLog("error", `❌ فشل إضافة ${member.username} - كل الحسابات مقيدة`);
+            } else {
+              addLog("warning", `Flood على ${account.phone} - إعادة بالحساب التالي`, account.phone);
+              onUpdateAccountStatus?.(account.id, "flood", `انتظار ${result.floodWait}s`);
+              rotateToNextAccount(activeAccounts);
+              i--; // retry same member
+              await sleep(1000);
+            }
           } else if (result.skip) {
             onUpdateMemberStatus(member.id, "skipped", result.error);
             batchSkipped++;
             statsRef.current.totalSkipped++;
             addLog("info", `تخطي: ${member.username} - ${result.error}`);
           } else {
-            onUpdateMemberStatus(member.id, "failed", result.error);
-            batchFailed++;
-            statsRef.current.totalFailed++;
-            addLog("error", `فشل: ${member.username} - ${result.error}`);
-            rotateToNextAccount(activeAccounts);
+            memberRetryCount++;
+            if (memberRetryCount >= activeAccounts.length) {
+              onUpdateMemberStatus(member.id, "failed", result.error);
+              batchFailed++;
+              statsRef.current.totalFailed++;
+              addLog("error", `❌ فشل إضافة ${member.username} - استنفذت كل الحسابات`);
+            } else {
+              addLog("warning", `فشل: ${member.username} بحساب ${account.phone} - إعادة بالتالي`);
+              onUpdateAccountStatus?.(account.id, "flood", result.error || "خطأ");
+              rotateToNextAccount(activeAccounts);
+              i--; // retry same member
+              await sleep(2000);
+            }
           }
 
           onUpdateProgress({
