@@ -133,21 +133,50 @@ export function OperationsPanel({
     addLog("info", `جاري استخراج الأعضاء من المجموعة...`);
 
     try {
-      const { data, error } = await supabase.functions.invoke("telegram-auth", {
-        body: {
-          action: "getGroupMembers",
-          sessionString: account.sessionString,
-          groupLink: sourceGroup,
-          apiId: account.apiId,
-          apiHash: account.apiHash,
-        },
-      });
+      const allMembers: any[] = [];
+      const seenIds = new Set<string>();
+      const limit = 200;
+      let offset = 0;
+      let hasMore = true;
+      let safetyBatches = 0;
 
-      if (error || data?.error) {
-        throw new Error(error?.message || data?.error);
+      while (hasMore) {
+        safetyBatches++;
+        if (safetyBatches > 500) {
+          throw new Error("توقف أمان: عدد دفعات كبير جداً");
+        }
+
+        const { data, error } = await supabase.functions.invoke("telegram-auth", {
+          body: {
+            action: "getGroupMembers",
+            sessionString: account.sessionString,
+            groupLink: sourceGroup,
+            apiId: account.apiId,
+            apiHash: account.apiHash,
+            limit,
+            offset,
+          },
+        });
+
+        if (error || data?.error) {
+          throw new Error(error?.message || data?.error);
+        }
+
+        const batch = Array.isArray(data?.members) ? data.members : [];
+        for (const m of batch) {
+          const id = m?.id?.toString?.() ?? String(m?.id ?? "");
+          if (!id || seenIds.has(id)) continue;
+          seenIds.add(id);
+          allMembers.push(m);
+        }
+
+        hasMore = Boolean(data?.hasMore) && batch.length > 0;
+        offset = typeof data?.nextOffset === "number" ? data.nextOffset : offset + batch.length;
+
+        await sleep(1200);
       }
 
-      const members: Member[] = (data?.members || []).map((m: any, index: number) => ({
+      const members: Member[] = allMembers.map((m: any, index: number) => ({
         id: crypto.randomUUID(),
         oderId: m.id?.toString() || index.toString(),
         username: m.username || "",

@@ -108,34 +108,66 @@ export function ExtractMembersDialog({
 
     try {
       addLog("info", `جاري استخراج جميع الأعضاء من: ${sourceGroup}`);
-      setExtractionStatus("جاري جلب جميع الأعضاء من السيرفر...");
+      setExtractionStatus("جاري جلب الأعضاء على دفعات...");
 
-      const { data, error: funcError } = await supabase.functions.invoke("telegram-auth", {
-        body: {
-          action: "getGroupMembers",
-          sessionString: account.sessionString,
-          groupLink: sourceGroup,
-          apiId: account.apiId,
-          apiHash: account.apiHash,
-        },
-      });
+      const allMembers: any[] = [];
+      const seenIds = new Set<string>();
+      const limit = 200;
+      let offset = 0;
+      let hasMore = true;
+      let safetyBatches = 0;
 
-      if (funcError) throw funcError;
+      while (hasMore) {
+        safetyBatches++;
+        if (safetyBatches > 500) {
+          throw new Error("توقف أمان: عدد دفعات كبير جداً");
+        }
 
-      const members = data?.members;
-      if (!members || !Array.isArray(members) || members.length === 0) {
-        setError("لم يتم العثور على أعضاء في المجموعة");
-        setStep("error");
-        return;
+        const { data, error: funcError } = await supabase.functions.invoke("telegram-auth", {
+          body: {
+            action: "getGroupMembers",
+            sessionString: account.sessionString,
+            groupLink: sourceGroup,
+            apiId: account.apiId,
+            apiHash: account.apiHash,
+            limit,
+            offset,
+          },
+        });
+
+        if (funcError) throw funcError;
+
+        if (data?.error) {
+          throw new Error(data.error);
+        }
+
+        const batch = Array.isArray(data?.members) ? data.members : [];
+        for (const m of batch) {
+          const id = m?.id?.toString?.() ?? String(m?.id ?? "");
+          if (!id || seenIds.has(id)) continue;
+          seenIds.add(id);
+          allMembers.push(m);
+        }
+
+        hasMore = Boolean(data?.hasMore) && batch.length > 0;
+        offset = typeof data?.nextOffset === "number" ? data.nextOffset : offset + batch.length;
+
+        setExtractionStatus(`تم جلب ${allMembers.length} عضو...`);
+        setProgress(Math.min(99, Math.round((safetyBatches / 20) * 100))); // تقدّم تقريبي
+
+        // تهدئة بسيطة لتجنب FLOOD
+        await new Promise((r) => setTimeout(r, 1200));
       }
 
+      const members = allMembers;
+
       // Deduplicate just in case
-      const seenIds = new Set<string>();
+      const seenIds2 = new Set<string>();
       const uniqueMembers: ExtractedMember[] = [];
       for (const m of members) {
         const oderId = m.id?.toString() || "";
-        if (!oderId || seenIds.has(oderId)) continue;
-        seenIds.add(oderId);
+        if (!oderId || seenIds2.has(oderId)) continue;
+        seenIds2.add(oderId);
         uniqueMembers.push({
           id: crypto.randomUUID(),
           oderId,

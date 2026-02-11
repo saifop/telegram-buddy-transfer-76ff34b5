@@ -483,95 +483,73 @@ async function handleLeaveGroup({ sessionString, groupLink, apiId, apiHash }, re
 /**
  * Get members from a group
  */
-async function handleGetGroupMembers({ sessionString, groupLink, apiId, apiHash }, res) {
+async function handleGetGroupMembers({ sessionString, groupLink, apiId, apiHash, limit, offset }, res) {
   if (!sessionString || !groupLink) {
     return res.status(400).json({ error: 'Missing required parameters' });
   }
 
+  // IMPORTANT:
+  // Railway/free proxies often have a hard request timeout (e.g. ~30s).
+  // Fetching ALL members in one request can take minutes for large groups.
+  // لذلك نعتمد pagination (limit/offset) حتى لا يعلق السيرفر ويرجع 502.
+
+  const batchSize = Math.min(Math.max(parseInt(limit || 200, 10) || 200, 1), 200);
+  const batchOffset = Math.max(parseInt(offset || 0, 10) || 0, 0);
+
+  let client;
+
   try {
-    const client = await getClientFromSession(sessionString, apiId || 123456, apiHash || 'demo');
-    
-    const { type, value } = parseGroupLink(groupLink);
-    
+    client = await getClientFromSession(sessionString, apiId || 123456, apiHash || 'demo');
+
+    const { value } = parseGroupLink(groupLink);
+
     if (!value) {
       return res.status(400).json({ error: 'Invalid group link' });
     }
-    
-    console.log(`Getting ALL members from group: ${value}`);
-    
+
+    console.log(`Getting members batch from group: ${value} (offset=${batchOffset}, limit=${batchSize})`);
+
     // Get the channel/group entity
     const entity = await client.getEntity(value);
-    
-    // Fetch ALL participants using pagination loop
-    const allMembers = [];
-    const seenIds = new Set();
-    let offset = 0;
-    const batchSize = 200;
-    let batchNum = 0;
-    
-    while (true) {
-      batchNum++;
-      console.log(`Fetching batch ${batchNum} (offset: ${offset})...`);
-      
-      const participants = await client.invoke(
-        new Api.channels.GetParticipants({
-          channel: entity,
-          filter: new Api.ChannelParticipantsRecent({}),
-          offset: offset,
-          limit: batchSize,
-          hash: BigInt(0),
-        })
-      );
-      
-      const users = participants.users || [];
-      
-      if (users.length === 0) {
-        console.log(`Batch ${batchNum}: no more users, stopping.`);
-        break;
-      }
-      
-      let newCount = 0;
-      for (const p of users) {
-        const oderId = p.id?.toString();
-        if (!oderId || seenIds.has(oderId)) continue;
-        seenIds.add(oderId);
-        newCount++;
-        allMembers.push({
-          id: oderId,
-          username: p.username || '',
-          firstName: p.firstName || '',
-          lastName: p.lastName || '',
-          phone: p.phone || '',
-        });
-      }
-      
-      console.log(`Batch ${batchNum}: ${users.length} returned, ${newCount} new, total: ${allMembers.length}`);
-      
-      // Stop if we got fewer than batchSize (end of list)
-      if (users.length < batchSize) break;
-      
-      // Stop if no new unique users found
-      if (newCount === 0) break;
-      
-      offset += users.length;
-      
-      // Small delay to avoid FLOOD
-      await new Promise(r => setTimeout(r, 1500));
-    }
-    
+
+    const participants = await client.invoke(
+      new Api.channels.GetParticipants({
+        channel: entity,
+        filter: new Api.ChannelParticipantsRecent({}),
+        offset: batchOffset,
+        limit: batchSize,
+        hash: BigInt(0),
+      })
+    );
+
+    const users = participants.users || [];
+
+    const members = users.map((p) => ({
+      id: p.id?.toString(),
+      username: p.username || '',
+      firstName: p.firstName || '',
+      lastName: p.lastName || '',
+      phone: p.phone || '',
+    })).filter((m) => Boolean(m.id));
+
+    const hasMore = users.length === batchSize;
+    const nextOffset = batchOffset + users.length;
+
     await client.disconnect();
-    
-    console.log(`Extracted ${allMembers.length} total unique members from ${value} in ${batchNum} batches`);
-    
+
     return res.json({
       success: true,
-      members: allMembers,
-      count: allMembers.length,
+      members,
+      count: members.length,
+      offset: batchOffset,
+      limit: batchSize,
+      hasMore,
+      nextOffset,
     });
 
   } catch (error) {
     console.error('GetGroupMembers error:', error);
-    
+
     const errorMessage = error.message || '';
     if (errorMessage.includes('CHANNEL_PRIVATE')) {
       return res.status(400).json({ error: 'المجموعة خاصة ولا يمكن الوصول إليها' });
@@ -579,8 +557,15 @@ async function handleGetGroupMembers({ sessionString, groupLink, apiId, apiHash 
     if (errorMessage.includes('CHAT_ADMIN_REQUIRED')) {
       return res.status(400).json({ error: 'يجب أن تكون مشرفاً لاستخراج الأعضاء' });
     }
-    
+    if (errorMessage.includes('FLOOD') || errorMessage.includes('PEER_FLOOD')) {
+      return res.status(429).json({ error: 'تم تجاوز الحد المسموح. انتظر قبل المحاولة مرة أخرى' });
+    }
+
     return res.status(500).json({ error: `خطأ في استخراج الأعضاء: ${errorMessage}` });
+  } finally {
+    try {
+      if (client) await client.disconnect();
+    } catch {}
   }
 }
 
