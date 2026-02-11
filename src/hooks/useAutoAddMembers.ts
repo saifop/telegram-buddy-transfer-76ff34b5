@@ -234,9 +234,31 @@ export function useAutoAddMembers({
       });
 
       if (error) {
-        const isBanned = error.message?.toLowerCase().includes("banned") || 
-                         error.message?.toLowerCase().includes("محظور");
-        return { success: false, error: error.message, banned: isBanned };
+        // supabase.functions.invoke puts a generic message in error.message for non-2xx
+        // The actual error body with Arabic text is in `data`
+        const actualErrorMsg = data?.error || error.message || "";
+        
+        const isBanned = actualErrorMsg.toLowerCase().includes("banned") || 
+                         actualErrorMsg.toLowerCase().includes("محظور") ||
+                         actualErrorMsg.includes("CHAT_WRITE_FORBIDDEN") ||
+                         actualErrorMsg.includes("USER_BANNED");
+        
+        // Check flood
+        if (actualErrorMsg.includes("flood") || actualErrorMsg.includes("FLOOD") || 
+            actualErrorMsg.includes("تم تجاوز الحد") || actualErrorMsg.includes("429")) {
+          const waitSeconds = extractFloodWaitSeconds(actualErrorMsg);
+          return { success: false, floodWait: waitSeconds, error: actualErrorMsg };
+        }
+        
+        // Check skippable
+        if (actualErrorMsg.includes("USER_PRIVACY_RESTRICTED") || actualErrorMsg.includes("خصوصية") ||
+            actualErrorMsg.includes("موجود مسبقاً") || actualErrorMsg.includes("USER_ALREADY_PARTICIPANT") ||
+            actualErrorMsg.includes("USER_CHANNELS_TOO_MUCH") || actualErrorMsg.includes("500 مجموعة")) {
+          addedUserIdsRef.current.add(member.oderId);
+          return { success: false, skip: true, error: actualErrorMsg };
+        }
+        
+        return { success: false, error: actualErrorMsg, banned: isBanned };
       }
 
       if (data?.success) {
