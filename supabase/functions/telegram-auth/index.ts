@@ -99,11 +99,16 @@ Deno.serve(async (req) => {
     if (mtprotoServiceUrl) {
       console.log(`Using external MTProto service: ${mtprotoServiceUrl}`);
       try {
+        const controller = new AbortController();
+        const timeoutMs = 20_000;
+        const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
         const response = await fetch(mtprotoServiceUrl, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ action, ...params }),
-        });
+          signal: controller.signal,
+        }).finally(() => clearTimeout(timeoutId));
 
         // Try to parse JSON; if service returns non-JSON, surface a clear error
         let data: unknown = null;
@@ -118,9 +123,11 @@ Deno.serve(async (req) => {
 
         if (!response.ok) {
           console.error("External service non-OK status:", response.status, data);
-          
+
           // Extract user-friendly error message from the external service
-          const rawExternalError = (data as { error?: unknown })?.error;
+          const rawExternalError = (data as { error?: unknown; message?: unknown })?.error;
+          const rawExternalMessage = (data as { message?: unknown })?.message;
+
           const externalError =
             typeof rawExternalError === "string"
               ? rawExternalError
@@ -128,62 +135,87 @@ Deno.serve(async (req) => {
                 ? JSON.stringify(rawExternalError)
                 : "";
 
+          const externalMessage =
+            typeof rawExternalMessage === "string"
+              ? rawExternalMessage
+              : rawExternalMessage
+                ? JSON.stringify(rawExternalMessage)
+                : "";
+
           // Some services wrap the Telegram error text inside other fields.
           // Build a combined text to match against reliably.
-          const combinedErrorText = [externalError, JSON.stringify(data)].filter(Boolean).join("\n");
+          const combinedErrorText = [externalError, externalMessage, JSON.stringify(data)]
+            .filter(Boolean)
+            .join("\n");
 
           if (combinedErrorText) {
             // Map common Telegram errors to user-friendly messages
             if (combinedErrorText.includes("CHAT_WRITE_FORBIDDEN")) {
-            return errorResponse("ليس لديك صلاحية إضافة أعضاء لهذه المجموعة. تأكد أنك مشرف.", 403);
-          }
+              return errorResponse("ليس لديك صلاحية إضافة أعضاء لهذه المجموعة. تأكد أنك مشرف.", 403);
+            }
             if (combinedErrorText.includes("USER_PRIVACY_RESTRICTED")) {
-            return errorResponse("خصوصية المستخدم تمنع الإضافة", 403);
-          }
+              return errorResponse("خصوصية المستخدم تمنع الإضافة", 403);
+            }
             if (combinedErrorText.includes("USER_NOT_MUTUAL_CONTACT")) {
-            return errorResponse("يجب أن يكون المستخدم جهة اتصال متبادلة", 403);
-          }
+              return errorResponse("يجب أن يكون المستخدم جهة اتصال متبادلة", 403);
+            }
             if (combinedErrorText.includes("PEER_FLOOD") || combinedErrorText.includes("FLOOD")) {
-            // Try to extract wait time from error
+              // Try to extract wait time from error
               const waitMatch = combinedErrorText.match(/FLOOD_WAIT[_\s]*(\d+)/i);
-            const waitSeconds = waitMatch ? waitMatch[1] : "60";
-            return errorResponse(`تم تجاوز الحد المسموح. انتظر ${waitSeconds} ثانية قبل المحاولة`, 429);
-          }
+              const waitSeconds = waitMatch ? waitMatch[1] : "60";
+              return errorResponse(
+                `تم تجاوز الحد المسموح. انتظر ${waitSeconds} ثانية قبل المحاولة`,
+                429,
+              );
+            }
             if (combinedErrorText.includes("CHAT_ADMIN_REQUIRED")) {
-            return errorResponse("يجب أن تكون مشرفاً للإضافة", 403);
-          }
+              return errorResponse("يجب أن تكون مشرفاً للإضافة", 403);
+            }
             if (combinedErrorText.includes("USER_ID_INVALID")) {
-            return errorResponse("لا يمكن التعرف على هذا المستخدم. تأكد من وجود username أو أن الحساب شاهد المستخدم مسبقاً", 400);
-          }
+              return errorResponse(
+                "لا يمكن التعرف على هذا المستخدم. تأكد من وجود username أو أن الحساب شاهد المستخدم مسبقاً",
+                400,
+              );
+            }
             if (combinedErrorText.includes("USER_NOT_PARTICIPANT")) {
-            return errorResponse("المستخدم ليس عضواً في المجموعة المصدر", 400);
-          }
+              return errorResponse("المستخدم ليس عضواً في المجموعة المصدر", 400);
+            }
             if (combinedErrorText.includes("USER_ALREADY_PARTICIPANT")) {
-            return errorResponse("المستخدم موجود مسبقاً في المجموعة المستهدفة", 400);
-          }
+              return errorResponse("المستخدم موجود مسبقاً في المجموعة المستهدفة", 400);
+            }
             if (combinedErrorText.includes("USER_CHANNELS_TOO_MUCH")) {
-            return errorResponse("العضو موجود في أكثر من 500 مجموعة (حد تيليجرام) - تم تخطيه", 400);
-          }
+              return errorResponse(
+                "العضو موجود في أكثر من 500 مجموعة (حد تيليجرام) - تم تخطيه",
+                400,
+              );
+            }
             if (combinedErrorText.includes("USERS_TOO_MUCH")) {
-            return errorResponse("المجموعة المستهدفة وصلت للحد الأقصى من الأعضاء", 400);
-          }
+              return errorResponse("المجموعة المستهدفة وصلت للحد الأقصى من الأعضاء", 400);
+            }
             if (combinedErrorText.includes("USER_BANNED_IN_CHANNEL")) {
-            return errorResponse("العضو محظور من هذه المجموعة", 403);
-          }
+              return errorResponse("العضو محظور من هذه المجموعة", 403);
+            }
             if (combinedErrorText.includes("USER_KICKED")) {
-            return errorResponse("العضو مطرود من هذه المجموعة ولا يمكن إضافته", 403);
+              return errorResponse("العضو مطرود من هذه المجموعة ولا يمكن إضافته", 403);
+            }
+
+            // Fallback: return upstream details with status
+            return errorResponse(
+              externalError || externalMessage || `Authentication service error (HTTP ${response.status})`,
+              response.status,
+            );
           }
-          // Return the original error message if not mapped
-            return errorResponse(externalError || "Authentication service error", response.status);
-          }
-          
-          return errorResponse("خادم المصادقة لا يستجيب (502). تأكد أن خادم Railway يعمل.", 502);
+
+          return errorResponse(`Authentication service error (HTTP ${response.status})`, 502);
         }
 
         return successResponse(data as object);
       } catch (err) {
+        if (err instanceof DOMException && err.name === "AbortError") {
+          return errorResponse("Authentication service timeout. Try again.", 504);
+        }
         console.error("External service error:", err);
-        return errorResponse("فشل الاتصال بخادم المصادقة. تأكد أن خادم Railway يعمل.", 502);
+        return errorResponse("Failed to connect to authentication service", 502);
       }
     }
 
