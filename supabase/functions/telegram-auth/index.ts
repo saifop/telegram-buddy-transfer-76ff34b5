@@ -177,13 +177,13 @@ Deno.serve(async (req) => {
             return errorResponse(externalError || "Authentication service error", response.status);
           }
           
-          return errorResponse("Authentication service error", 502);
+          return errorResponse("خادم المصادقة لا يستجيب (502). تأكد أن خادم Railway يعمل.", 502);
         }
 
         return successResponse(data as object);
       } catch (err) {
         console.error("External service error:", err);
-        return errorResponse("Failed to connect to authentication service", 502);
+        return errorResponse("فشل الاتصال بخادم المصادقة. تأكد أن خادم Railway يعمل.", 502);
       }
     }
 
