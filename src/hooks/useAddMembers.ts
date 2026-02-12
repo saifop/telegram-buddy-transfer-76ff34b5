@@ -115,6 +115,70 @@ export function useAddMembers({
     }
   };
 
+  // Fetch existing members from the target group to skip them
+  const fetchTargetGroupMembers = async (
+    account: TelegramAccount
+  ): Promise<Set<string>> => {
+    const existingIds = new Set<string>();
+    const existingUsernames = new Set<string>();
+    let offset = 0;
+    let hasMore = true;
+    let safety = 0;
+
+    addLog("info", `🔍 جاري فحص أعضاء المجموعة المستهدفة لتجنب الإضافات المكررة...`);
+
+    while (hasMore && safety < 100) {
+      safety++;
+      try {
+        const { data, error } = await supabase.functions.invoke("telegram-auth", {
+          body: {
+            action: "getGroupMembers",
+            sessionString: account.sessionString,
+            groupLink: settings.targetGroup,
+            apiId: account.apiId,
+            apiHash: account.apiHash,
+            limit: 200,
+            offset,
+          },
+        });
+
+        if (error || data?.error) {
+          addLog("warning", `تعذر فحص أعضاء المجموعة المستهدفة: ${error?.message || data?.error}`);
+          break;
+        }
+
+        const batch = Array.isArray(data?.members) ? data.members : [];
+        for (const m of batch) {
+          const id = String(m?.id ?? "");
+          if (id) existingIds.add(id);
+          const uname = (m?.username || "").toLowerCase().trim();
+          if (uname) existingUsernames.add(uname);
+        }
+
+        hasMore = Boolean(data?.hasMore) && batch.length > 0;
+        offset = typeof data?.nextOffset === "number" ? data.nextOffset : offset + batch.length;
+        await sleep(1200);
+      } catch {
+        break;
+      }
+    }
+
+    // Merge: return a combined set (IDs + usernames) for matching
+    const combined = new Set<string>();
+    existingIds.forEach(id => combined.add(id));
+    existingUsernames.forEach(u => combined.add(u));
+    
+    addLog("info", `✅ تم العثور على ${existingIds.size} عضو موجود في المجموعة المستهدفة`);
+    return combined;
+  };
+
+  // Check if a member already exists in the target group
+  const isMemberInTargetGroup = (member: Member, existingSet: Set<string>): boolean => {
+    if (existingSet.has(member.oderId)) return true;
+    if (member.username && existingSet.has(member.username.toLowerCase().trim())) return true;
+    return false;
+  };
+
   // Add a single member using a specific account
   const addMemberWithAccount = async (
     member: Member,
@@ -139,10 +203,19 @@ export function useAddMembers({
       }
 
       if (data?.success) {
+        // Check for USER_ALREADY_PARTICIPANT returned as "success" — treat as skip
+        if (data?.alreadyParticipant) {
+          return { success: false, error: "العضو موجود مسبقاً في المجموعة" };
+        }
         return { success: true };
       }
 
       const errorMsg = data?.error || "خطأ غير معروف";
+
+      // USER_ALREADY_PARTICIPANT — not a real add
+      if (errorMsg.includes("USER_ALREADY_PARTICIPANT") || errorMsg.includes("موجود مسبقاً")) {
+        return { success: false, error: "العضو موجود مسبقاً في المجموعة" };
+      }
 
       // Check for flood wait
       if (errorMsg.toLowerCase().includes("flood") || errorMsg.includes("تم تجاوز الحد") || errorMsg.includes("429")) {
@@ -220,6 +293,10 @@ export function useAddMembers({
         onUpdateMemberStatus(member.id, "added");
         worker.addedCount++;
         addLog("success", `تمت إضافة: ${member.username || member.firstName}`, worker.account.phone);
+      } else if (result.error?.includes("موجود مسبقاً")) {
+        // USER_ALREADY_PARTICIPANT — not a real add, mark as skipped
+        onUpdateMemberStatus(member.id, "skipped", "موجود مسبقاً في المجموعة");
+        addLog("info", `⏭️ ${member.username || member.firstName} موجود مسبقاً`, worker.account.phone);
       } else if (result.floodWait) {
         // Put member back? No, mark as failed for this attempt
         onUpdateMemberStatus(member.id, "failed", result.error);
@@ -317,12 +394,37 @@ export function useAddMembers({
       return;
     }
 
-    // Step 2: Start adding members
-    addLog("info", `بدء إضافة ${selectedMembers.length} عضو بواسطة ${activeAccounts.length} حساب بالتوازي`);
-    onUpdateProgress({ current: 0, total: selectedMembers.length });
+    // Step 2: Pre-fetch existing members from target group to skip duplicates
+    const existingMembers = await fetchTargetGroupMembers(activeAccounts[0]);
+    
+    // Filter out members already in target group
+    const filteredMembers = selectedMembers.filter(m => {
+      if (isMemberInTargetGroup(m, existingMembers)) {
+        onUpdateMemberStatus(m.id, "skipped", "موجود مسبقاً في المجموعة المستهدفة");
+        addLog("info", `⏭️ تخطي ${m.username || m.firstName} - موجود مسبقاً`);
+        return false;
+      }
+      return true;
+    });
+
+    if (filteredMembers.length === 0) {
+      addLog("success", "جميع الأعضاء موجودون مسبقاً في المجموعة المستهدفة!");
+      setIsRunning(false);
+      onOperationEnd();
+      return;
+    }
+
+    const skippedCount = selectedMembers.length - filteredMembers.length;
+    if (skippedCount > 0) {
+      addLog("info", `تم تخطي ${skippedCount} عضو موجود مسبقاً`);
+    }
+
+    // Step 3: Start adding members
+    addLog("info", `بدء إضافة ${filteredMembers.length} عضو بواسطة ${activeAccounts.length} حساب بالتوازي`);
+    onUpdateProgress({ current: 0, total: filteredMembers.length });
 
     // Create a queue of members
-    const memberQueue = [...selectedMembers];
+    const memberQueue = [...filteredMembers];
     let queueIndex = 0;
     let processedCount = 0;
 
