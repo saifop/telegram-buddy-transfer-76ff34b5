@@ -84,6 +84,54 @@ export function useAutoAddMembers({
     return settings.cooldownAfterFlood;
   };
 
+  // Fetch existing members from the target group
+  const fetchTargetGroupMembers = async (
+    account: TelegramAccount
+  ): Promise<Set<string>> => {
+    const combined = new Set<string>();
+    let offset = 0;
+    let hasMore = true;
+    let safety = 0;
+
+    addLog("info", `🔍 جاري فحص أعضاء المجموعة المستهدفة...`);
+
+    while (hasMore && safety < 100) {
+      safety++;
+      try {
+        const { data, error } = await supabase.functions.invoke("telegram-auth", {
+          body: {
+            action: "getGroupMembers",
+            sessionString: account.sessionString,
+            groupLink: settings.targetGroup,
+            apiId: account.apiId,
+            apiHash: account.apiHash,
+            limit: 200,
+            offset,
+          },
+        });
+
+        if (error || data?.error) break;
+
+        const batch = Array.isArray(data?.members) ? data.members : [];
+        for (const m of batch) {
+          const id = String(m?.id ?? "");
+          if (id) combined.add(id);
+          const uname = (m?.username || "").toLowerCase().trim();
+          if (uname) combined.add(uname);
+        }
+
+        hasMore = Boolean(data?.hasMore) && batch.length > 0;
+        offset = typeof data?.nextOffset === "number" ? data.nextOffset : offset + batch.length;
+        await sleep(1200);
+      } catch {
+        break;
+      }
+    }
+
+    addLog("info", `✅ ${combined.size} عضو موجود في المجموعة المستهدفة`);
+    return combined;
+  };
+
   // Send browser notification
   const sendNotification = (title: string, body: string) => {
     if ("Notification" in window) {
@@ -262,6 +310,12 @@ export function useAutoAddMembers({
       }
 
       if (data?.success) {
+        // Check if server returned success but it was actually "already participant"
+        if (data?.alreadyParticipant) {
+          addedUserIdsRef.current.add(member.oderId);
+          return { success: false, skip: true, error: "العضو موجود مسبقاً في المجموعة" };
+        }
+        
         // Mark as successfully added
         addedUserIdsRef.current.add(member.oderId);
         
@@ -429,22 +483,41 @@ export function useAutoAddMembers({
         addLog("success", `✅ اكتمل الاستخراج: ${allGroupMembers.length} عضو فريد`);
         onMembersExtracted(allGroupMembers);
 
-        // === PHASE 2: Add ALL extracted members ===
-        addLog("info", `📤 بدء إضافة ${allGroupMembers.length} عضو...`);
+        // === PHASE 2: Pre-filter existing members in target group ===
+        const existingTargetMembers = await fetchTargetGroupMembers(activeAccounts[0]);
+        
+        const membersToAdd = allGroupMembers.filter(m => {
+          const idMatch = existingTargetMembers.has(m.oderId);
+          const usernameMatch = m.username && existingTargetMembers.has(m.username.toLowerCase().trim());
+          if (idMatch || usernameMatch) {
+            addedUserIdsRef.current.add(m.oderId);
+            onUpdateMemberStatus(m.id, "skipped", "موجود مسبقاً في المجموعة المستهدفة");
+            return false;
+          }
+          return true;
+        });
+
+        const preSkipped = allGroupMembers.length - membersToAdd.length;
         let batchAdded = 0;
         let batchFailed = 0;
-        let batchSkipped = 0;
-        let memberRetryCount = 0; // Safety: max retries per member = number of accounts
+        let batchSkipped = preSkipped;
+        if (preSkipped > 0) {
+          statsRef.current.totalSkipped += preSkipped;
+        }
 
-        for (let i = 0; i < allGroupMembers.length && !abortRef.current; i++) {
-          memberRetryCount = 0; // Reset for each new member
+        // === PHASE 3: Add remaining members ===
+        addLog("info", `📤 بدء إضافة ${membersToAdd.length} عضو...`);
+        let memberRetryCount = 0;
+
+        for (let i = 0; i < membersToAdd.length && !abortRef.current; i++) {
+          memberRetryCount = 0;
           // Check pause
           while (pauseRef.current && !abortRef.current) {
             await sleep(500);
           }
           if (abortRef.current) break;
 
-          const member = allGroupMembers[i];
+          const member = membersToAdd[i];
           
           // Skip if already added
           if (addedUserIdsRef.current.has(member.oderId)) {
@@ -526,7 +599,7 @@ export function useAutoAddMembers({
 
           onUpdateProgress({
             current: i + 1,
-            total: allGroupMembers.length,
+            total: membersToAdd.length,
             batch: 1,
             groupIndex: groupIdx,
             totalGroups: sourceGroups.length,
