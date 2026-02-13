@@ -2,3 +2,6 @@ project_id = "qrgrobcgzqfpbyrqkxum"
 
 [functions.telegram-auth]
 verify_jwt = false
+
+[functions.fivesim]
+verify_jwt = false
