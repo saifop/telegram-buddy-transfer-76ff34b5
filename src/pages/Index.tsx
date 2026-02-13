@@ -13,6 +13,7 @@ import { AddMembersPanel } from "@/components/AddMembersPanel";
 import { ExtractMembersDialog } from "@/components/ExtractMembersDialog";
 import { ActiveMembersExtractor } from "@/components/ActiveMembersExtractor";
 import { ExtractedMembersFile } from "@/components/ExtractedMembersFile";
+import { FiveSimPanel } from "@/components/FiveSimPanel";
 
 export interface TelegramAccount {
   id: string;
@@ -249,6 +250,7 @@ const Index = () => {
           <header className="h-14 border-b bg-card flex items-center justify-between px-6">
             <h1 className="text-xl font-bold text-foreground">مدير حسابات تيليجرام</h1>
             <div className="flex items-center gap-4">
+              <FiveSimPanel />
               <span className="text-sm text-muted-foreground">
                 الحسابات: {accounts.filter((a) => a.isSelected).length}/{accounts.length}
               </span>
