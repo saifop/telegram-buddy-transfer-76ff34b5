@@ -104,7 +104,22 @@ serve(async (req) => {
   }
 
   try {
-    const { action, country, orderId } = await req.json();
+    let body: any = {};
+    try {
+      const text = await req.text();
+      if (text) body = JSON.parse(text);
+    } catch {
+      // No body or invalid JSON - use empty object
+    }
+
+    const { action, country, orderId } = body;
+
+    if (!action) {
+      return new Response(JSON.stringify({ error: 'action is required' }), {
+        status: 200,
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      });
+    }
 
     let result: any;
 
@@ -145,7 +160,7 @@ serve(async (req) => {
   } catch (error: any) {
     console.error('5sim error:', error);
     return new Response(JSON.stringify({ error: error.message }), {
-      status: 400,
+      status: 200,
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },
     });
   }
