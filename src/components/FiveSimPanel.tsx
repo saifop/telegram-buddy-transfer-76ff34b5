@@ -86,8 +86,8 @@ export function FiveSimPanel() {
   const [loadingPrices, setLoadingPrices] = useState(false);
   const [orders, setOrders] = useState<OrderInfo[]>([]);
   const [buyingProgress, setBuyingProgress] = useState({ current: 0, total: 0, phase: "" });
-  const [apiId, setApiId] = useState(() => localStorage.getItem("5sim_api_id") || "");
-  const [apiHash, setApiHash] = useState(() => localStorage.getItem("5sim_api_hash") || "");
+  const apiId = "19757887";
+  const apiHash = "e76390019d6fa291b1ca0f8b3d71d005";
 
   const fetchBalance = useCallback(async () => {
     try {
@@ -102,11 +102,6 @@ export function FiveSimPanel() {
     if (open) fetchBalance();
   }, [open, fetchBalance]);
 
-  // Save API credentials to localStorage
-  useEffect(() => {
-    if (apiId) localStorage.setItem("5sim_api_id", apiId);
-    if (apiHash) localStorage.setItem("5sim_api_hash", apiHash);
-  }, [apiId, apiHash]);
 
   const fetchPrices = async (country: string) => {
     setLoadingPrices(true);
@@ -443,43 +438,6 @@ export function FiveSimPanel() {
             </CardContent>
           </Card>
 
-          {/* Telegram API Credentials */}
-          <Card>
-            <CardHeader className="p-3 pb-1">
-              <CardTitle className="text-sm flex items-center gap-2">
-                <Key className="h-4 w-4" />
-                بيانات Telegram API
-              </CardTitle>
-            </CardHeader>
-            <CardContent className="p-3 pt-2 space-y-2">
-              <div className="grid grid-cols-2 gap-2">
-                <div>
-                  <Label className="text-xs">API ID</Label>
-                  <Input
-                    value={apiId}
-                    onChange={(e) => setApiId(e.target.value)}
-                    placeholder="مثال: 12345678"
-                    className="h-8 text-xs"
-                  />
-                </div>
-                <div>
-                  <Label className="text-xs">API Hash</Label>
-                  <Input
-                    value={apiHash}
-                    onChange={(e) => setApiHash(e.target.value)}
-                    placeholder="32 حرف"
-                    className="h-8 text-xs"
-                  />
-                </div>
-              </div>
-              <p className="text-[10px] text-muted-foreground">
-                احصل عليهم من{" "}
-                <a href="https://my.telegram.org" target="_blank" rel="noopener" className="underline">
-                  my.telegram.org
-                </a>
-              </p>
-            </CardContent>
-          </Card>
 
           {/* Country Selection */}
           <div className="space-y-2">
@@ -537,7 +495,7 @@ export function FiveSimPanel() {
                 <Button
                   className="w-full"
                   onClick={handleBuy}
-                  disabled={loading || quantity < 1 || !apiId || !apiHash || (balance !== null && totalPrice > balance)}
+                  disabled={loading || quantity < 1 || (balance !== null && totalPrice > balance)}
                 >
                   {loading ? (
                     <>
@@ -554,9 +512,6 @@ export function FiveSimPanel() {
 
                 {balance !== null && totalPrice > balance && (
                   <p className="text-xs text-destructive text-center">الرصيد غير كافٍ</p>
-                )}
-                {(!apiId || !apiHash) && (
-                  <p className="text-xs text-destructive text-center">أدخل API ID و API Hash أولاً</p>
                 )}
               </CardContent>
             </Card>
