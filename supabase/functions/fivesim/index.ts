@@ -18,6 +18,10 @@ function getHeaders() {
 
 async function getBalance() {
   const res = await fetch(`${FIVESIM_BASE}/user/profile`, { headers: getHeaders() });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Balance failed (${res.status}): ${text.slice(0, 200)}`);
+  }
   const data = await res.json();
   return { balance: data.balance, currency: data.default_country?.currency || 'RUB' };
 }
