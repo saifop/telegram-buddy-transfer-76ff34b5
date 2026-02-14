@@ -134,13 +134,18 @@ export function FiveSimPanel() {
 
   const totalPrice = priceInfo ? priceInfo.Price * quantity : 0;
 
-  const waitForSms = async (orderId: number, maxAttempts = 60): Promise<string | null> => {
+  // Wait for SMS - returns all unique codes or null if timeout
+  const waitForSms = async (orderId: number, maxAttempts = 24): Promise<string[] | null> => {
+    // 24 attempts × 5s = 2 minutes max wait
     for (let i = 0; i < maxAttempts; i++) {
       await new Promise((r) => setTimeout(r, 5000));
       try {
         const data = await call5sim("checkOrder", { orderId });
         if (data.sms && data.sms.length > 0) {
-          return data.sms[0].code;
+          // Get unique codes, latest first
+          const allCodes = data.sms.map((s: any) => String(s.code));
+          const codes: string[] = Array.from(new Set<string>(allCodes)).reverse();
+          return codes;
         }
         if (data.status === "CANCELED" || data.status === "TIMEOUT" || data.status === "BANNED") {
           return null;
@@ -152,185 +157,183 @@ export function FiveSimPanel() {
     return null;
   };
 
-  const registerTelegramAccount = async (
-    phone: string,
-    smsCode: string,
-  ): Promise<string | null> => {
-    try {
-      // Step 1: Send code to Telegram
-      const sendResult = await callTelegramAuth("sendCode", {
-        apiId,
-        apiHash,
-        phoneNumber: phone,
+  const MAX_RETRIES = 5; // Max number of retries per account slot
+
+  const buyAndRegisterOne = async (
+    index: number,
+    total: number,
+    allOrders: OrderInfo[],
+  ): Promise<void> => {
+    for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+      const attemptLabel = attempt > 0 ? ` (محاولة ${attempt + 1})` : "";
+
+      // Step 1: Buy number
+      setBuyingProgress({
+        current: index + 1,
+        total,
+        phase: `شراء رقم ${index + 1}${attemptLabel}...`,
       });
 
-      if (!sendResult.success) {
-        throw new Error(sendResult.message || "فشل إرسال الكود");
+      let order5sim: any;
+      try {
+        order5sim = await call5sim("buyNumber", { country: selectedCountry });
+      } catch (e: any) {
+        // Can't buy → fail this slot
+        const failOrder: OrderInfo = {
+          id: Date.now(),
+          phone: "---",
+          status: "failed",
+          price: 0,
+          errorMessage: `فشل الشراء: ${e.message}`,
+        };
+        allOrders.push(failOrder);
+        setOrders([...allOrders]);
+        return;
       }
 
-      const sessionId = sendResult.sessionId;
+      const currentOrder: OrderInfo = {
+        id: order5sim.id,
+        phone: order5sim.phone,
+        status: "waiting_sms",
+        price: order5sim.price,
+      };
+      // Replace or add order in list
+      const existingIdx = allOrders.findIndex((o) => o.phone === "---" && o.status === "failed");
+      if (existingIdx >= 0) {
+        allOrders[existingIdx] = currentOrder;
+      } else {
+        allOrders.push(currentOrder);
+      }
+      setOrders([...allOrders]);
 
-      // Step 2: Verify with SMS code from 5sim
-      const verifyResult = await callTelegramAuth("verifyCode", {
-        sessionId,
-        code: smsCode,
+      // Step 2: Send code to Telegram
+      setBuyingProgress({
+        current: index + 1,
+        total,
+        phase: `إرسال كود تيليجرام لـ ${currentOrder.phone}${attemptLabel}...`,
       });
 
-      if (!verifyResult.success) {
-        throw new Error(verifyResult.message || "فشل التحقق من الكود");
+      let sessionId: string | null = null;
+      try {
+        const sendResult = await callTelegramAuth("sendCode", {
+          apiId,
+          apiHash,
+          phoneNumber: currentOrder.phone,
+        });
+        sessionId = sendResult.sessionId;
+      } catch (e: any) {
+        currentOrder.status = "failed";
+        currentOrder.errorMessage = `فشل إرسال الكود: ${e.message}`;
+        setOrders([...allOrders]);
+        try { await call5sim("cancelOrder", { orderId: currentOrder.id }); } catch {}
+        continue; // Retry with new number
       }
 
-      // Step 3: Get session string
-      const sessionResult = await callTelegramAuth("getSession", {
-        sessionId,
+      // Step 3: Wait for SMS from 5sim
+      setBuyingProgress({
+        current: index + 1,
+        total,
+        phase: `انتظار كود SMS لـ ${currentOrder.phone}${attemptLabel}...`,
       });
 
-      if (!sessionResult.success || !sessionResult.sessionString) {
-        throw new Error("فشل استخراج الجلسة");
+      const codes = await waitForSms(currentOrder.id);
+      if (!codes || codes.length === 0) {
+        // No SMS = code went to Telegram app (number already registered)
+        currentOrder.status = "failed";
+        currentOrder.errorMessage = "الكود أُرسل لتطبيق تيليجرام - الرقم مسجل مسبقاً";
+        setOrders([...allOrders]);
+        try { await call5sim("cancelOrder", { orderId: currentOrder.id }); } catch {}
+        toast({
+          title: `رقم ${currentOrder.phone}`,
+          description: "الكود ذهب للتطبيق وليس SMS. جاري شراء رقم جديد...",
+        });
+        continue; // Retry with new number
       }
 
-      return sessionResult.sessionString;
-    } catch (e: any) {
-      console.error("Registration error:", e);
-      throw e;
-    }
-  };
+      // SMS received! Try each code (latest first)
+      currentOrder.smsCode = codes[0];
+      currentOrder.status = "registering";
+      setOrders([...allOrders]);
 
-  const handleBuy = async () => {
-    if (!selectedCountry || !priceInfo || quantity < 1) return;
-
-    if (!apiId || !apiHash) {
-      toast({
-        title: "مطلوب",
-        description: "أدخل API ID و API Hash أولاً",
-        variant: "destructive",
+      setBuyingProgress({
+        current: index + 1,
+        total,
+        phase: `تسجيل حساب ${currentOrder.phone}...`,
       });
-      return;
-    }
 
-    setLoading(true);
-    setOrders([]);
-    const newOrders: OrderInfo[] = [];
-
-    try {
-      // Phase 1: Buy all numbers
-      for (let i = 0; i < quantity; i++) {
-        setBuyingProgress({
-          current: i + 1,
-          total: quantity,
-          phase: `شراء رقم ${i + 1} من ${quantity}...`,
-        });
-
-        try {
-          const order = await call5sim("buyNumber", { country: selectedCountry });
-          newOrders.push({
-            id: order.id,
-            phone: order.phone,
-            status: "waiting_sms",
-            price: order.price,
-          });
-          setOrders([...newOrders]);
-        } catch (e: any) {
-          toast({
-            title: `فشل شراء الرقم ${i + 1}`,
-            description: e.message,
-            variant: "destructive",
-          });
-          break;
-        }
-      }
-
-      // Phase 2: For each number - wait for SMS then register
-      for (let i = 0; i < newOrders.length; i++) {
-        const order = newOrders[i];
-
-        // 2a: Send code to Telegram first
-        setBuyingProgress({
-          current: i + 1,
-          total: newOrders.length,
-          phase: `إرسال كود تيليجرام لـ ${order.phone}...`,
-        });
-
-        let sessionId: string | null = null;
-        try {
-          const sendResult = await callTelegramAuth("sendCode", {
-            apiId,
-            apiHash,
-            phoneNumber: order.phone,
-          });
-          sessionId = sendResult.sessionId;
-        } catch (e: any) {
-          order.status = "failed";
-          order.errorMessage = `فشل إرسال الكود: ${e.message}`;
-          setOrders([...newOrders]);
-          try { await call5sim("cancelOrder", { orderId: order.id }); } catch {}
-          continue;
-        }
-
-        // 2b: Wait for SMS from 5sim
-        setBuyingProgress({
-          current: i + 1,
-          total: newOrders.length,
-          phase: `انتظار كود SMS لـ ${order.phone}...`,
-        });
-
-        const code = await waitForSms(order.id);
-        if (!code) {
-          order.status = "timeout";
-          order.errorMessage = "لم يصل كود SMS";
-          setOrders([...newOrders]);
-          try { await call5sim("cancelOrder", { orderId: order.id }); } catch {}
-          continue;
-        }
-
-        order.smsCode = code;
-        order.status = "registering";
-        setOrders([...newOrders]);
-
-        // 2c: Verify code with Telegram
-        setBuyingProgress({
-          current: i + 1,
-          total: newOrders.length,
-          phase: `تسجيل حساب ${order.phone}...`,
-        });
-
+      let verified = false;
+      for (const code of codes) {
         try {
           const verifyResult = await callTelegramAuth("verifyCode", {
             sessionId,
             code,
           });
-
-          if (!verifyResult.success) {
-            throw new Error(verifyResult.message || "فشل التحقق");
+          if (verifyResult.success) {
+            verified = true;
+            currentOrder.smsCode = code;
+            break;
           }
-
-          // 2d: Get session string
-          const sessionResult = await callTelegramAuth("getSession", { sessionId });
-
-          if (sessionResult.sessionString) {
-            order.sessionString = sessionResult.sessionString;
-            order.status = "got_session";
-          } else {
-            throw new Error("لم يتم استخراج الجلسة");
-          }
-
-          try { await call5sim("finishOrder", { orderId: order.id }); } catch {}
-        } catch (e: any) {
-          order.status = "failed";
-          order.errorMessage = e.message;
-          try { await call5sim("finishOrder", { orderId: order.id }); } catch {}
+        } catch {
+          // Try next code
         }
+      }
 
-        setOrders([...newOrders]);
+      if (!verified) {
+        currentOrder.status = "failed";
+        currentOrder.errorMessage = "فشل التحقق من جميع الأكواد";
+        setOrders([...allOrders]);
+        try { await call5sim("finishOrder", { orderId: currentOrder.id }); } catch {}
+        continue; // Retry with new number
+      }
+
+      // Step 4: Get session string
+      try {
+        const sessionResult = await callTelegramAuth("getSession", { sessionId });
+        if (sessionResult.sessionString) {
+          currentOrder.sessionString = sessionResult.sessionString;
+          currentOrder.status = "got_session";
+        } else {
+          throw new Error("لم يتم استخراج الجلسة");
+        }
+        try { await call5sim("finishOrder", { orderId: currentOrder.id }); } catch {}
+      } catch (e: any) {
+        currentOrder.status = "failed";
+        currentOrder.errorMessage = e.message;
+        try { await call5sim("finishOrder", { orderId: currentOrder.id }); } catch {}
+        continue; // Retry with new number
+      }
+
+      setOrders([...allOrders]);
+      return; // Success!
+    }
+
+    // All retries exhausted
+    toast({
+      title: "تنبيه",
+      description: `فشل الحساب ${index + 1} بعد ${MAX_RETRIES} محاولات`,
+      variant: "destructive",
+    });
+  };
+
+  const handleBuy = async () => {
+    if (!selectedCountry || !priceInfo || quantity < 1) return;
+
+    setLoading(true);
+    setOrders([]);
+    const allOrders: OrderInfo[] = [];
+
+    try {
+      for (let i = 0; i < quantity; i++) {
+        await buyAndRegisterOne(i, quantity, allOrders);
       }
 
       setBuyingProgress({ current: 0, total: 0, phase: "" });
       fetchBalance();
 
-      const successCount = newOrders.filter((o) => o.status === "got_session").length;
+      const successCount = allOrders.filter((o) => o.status === "got_session").length;
       toast({
         title: "اكتملت العملية",
-        description: `تم إنشاء ${successCount} جلسة من ${newOrders.length} رقم`,
+        description: `تم إنشاء ${successCount} جلسة من ${quantity} مطلوب`,
       });
     } catch (e: any) {
       toast({ title: "خطأ", description: e.message, variant: "destructive" });
