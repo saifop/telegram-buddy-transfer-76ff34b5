@@ -33,32 +33,49 @@ export function ExtractedMembersFile({
 }: ExtractedMembersFileProps) {
   const [importStats, setImportStats] = useState<{ total: number; new: number } | null>(null);
 
+  const CHUNK_SIZE = 15000;
+
+  const downloadChunked = (membersList: typeof members, filePrefix: string) => {
+    const mapped = membersList.map((m) => ({
+      id: m.oderId,
+      username: m.username,
+      firstName: m.firstName,
+      lastName: m.lastName,
+      phone: m.phone,
+      status: m.status,
+      addedAt: m.addedAt?.toISOString(),
+    }));
+
+    const totalChunks = Math.ceil(mapped.length / CHUNK_SIZE);
+    const date = new Date().toISOString().split("T")[0];
+
+    for (let i = 0; i < totalChunks; i++) {
+      const chunk = mapped.slice(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE);
+      const extractedData: ExtractedMemberFile = {
+        extractedAt: new Date().toISOString(),
+        totalMembers: chunk.length,
+        members: chunk,
+      };
+
+      const blob = new Blob([JSON.stringify(extractedData, null, 2)], {
+        type: "application/json",
+      });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      const suffix = totalChunks > 1 ? `-part${i + 1}of${totalChunks}` : "";
+      a.download = `${filePrefix}-${date}${suffix}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+    }
+
+    const chunksMsg = totalChunks > 1 ? ` (${totalChunks} ملفات)` : "";
+    addLog("success", `تم تحميل ${membersList.length} عضو${chunksMsg}`);
+  };
+
   // Download all extracted members
   const handleDownloadExtracted = () => {
-    const extractedData: ExtractedMemberFile = {
-      extractedAt: new Date().toISOString(),
-      totalMembers: members.length,
-      members: members.map((m) => ({
-        id: m.oderId,
-        username: m.username,
-        firstName: m.firstName,
-        lastName: m.lastName,
-        phone: m.phone,
-        status: m.status,
-        addedAt: m.addedAt?.toISOString(),
-      })),
-    };
-
-    const blob = new Blob([JSON.stringify(extractedData, null, 2)], {
-      type: "application/json",
-    });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `extracted-members-${new Date().toISOString().split("T")[0]}.json`;
-    a.click();
-    URL.revokeObjectURL(url);
-    addLog("success", `تم تحميل ${members.length} عضو مستخرج`);
+    downloadChunked(members, "extracted-members");
   };
 
   // Download only successfully added members
@@ -70,30 +87,7 @@ export function ExtractedMembersFile({
       return;
     }
 
-    const extractedData: ExtractedMemberFile = {
-      extractedAt: new Date().toISOString(),
-      totalMembers: addedMembers.length,
-      members: addedMembers.map((m) => ({
-        id: m.oderId,
-        username: m.username,
-        firstName: m.firstName,
-        lastName: m.lastName,
-        phone: m.phone,
-        status: m.status,
-        addedAt: m.addedAt?.toISOString(),
-      })),
-    };
-
-    const blob = new Blob([JSON.stringify(extractedData, null, 2)], {
-      type: "application/json",
-    });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `successful-members-${new Date().toISOString().split("T")[0]}.json`;
-    a.click();
-    URL.revokeObjectURL(url);
-    addLog("success", `تم تحميل ${addedMembers.length} عضو ناجح`);
+    downloadChunked(addedMembers, "successful-members");
   };
 
   // Import members from file
