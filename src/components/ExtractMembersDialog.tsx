@@ -119,8 +119,8 @@ export function ExtractMembersDialog({
 
       while (hasMore) {
         safetyBatches++;
-        if (safetyBatches > 500) {
-          throw new Error("توقف أمان: عدد دفعات كبير جداً");
+        if (safetyBatches > 1000) {
+          throw new Error("توقف أمان: تجاوز الحد الأقصى للدفعات");
         }
 
         const { data, error: funcError } = await supabase.functions.invoke("telegram-auth", {

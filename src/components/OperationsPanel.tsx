@@ -142,7 +142,7 @@ export function OperationsPanel({
 
       while (hasMore) {
         safetyBatches++;
-        if (safetyBatches > 500) {
+        if (safetyBatches > 1000) {
           throw new Error("توقف أمان: عدد دفعات كبير جداً");
         }
 
