@@ -488,14 +488,6 @@ async function handleGetGroupMembers({ sessionString, groupLink, apiId, apiHash,
     return res.status(400).json({ error: 'Missing required parameters' });
   }
 
-  // IMPORTANT:
-  // Railway/free proxies often have a hard request timeout (e.g. ~30s).
-  // Fetching ALL members in one request can take minutes for large groups.
-  // لذلك نعتمد pagination (limit/offset) حتى لا يعلق السيرفر ويرجع 502.
-
-  const batchSize = Math.min(Math.max(parseInt(limit || 200, 10) || 200, 1), 200);
-  const batchOffset = Math.max(parseInt(offset || 0, 10) || 0, 0);
-
   let client;
 
   try {
@@ -507,44 +499,90 @@ async function handleGetGroupMembers({ sessionString, groupLink, apiId, apiHash,
       return res.status(400).json({ error: 'Invalid group link' });
     }
 
-    console.log(`Getting members batch from group: ${value} (offset=${batchOffset}, limit=${batchSize})`);
+    console.log(`Getting ALL members from group: ${value}`);
 
     // Get the channel/group entity
     const entity = await client.getEntity(value);
 
-    const participants = await client.invoke(
-      new Api.channels.GetParticipants({
-        channel: entity,
-        filter: new Api.ChannelParticipantsRecent({}),
-        offset: batchOffset,
-        limit: batchSize,
-        hash: BigInt(0),
-      })
-    );
+    // Strategy: Use ChannelParticipantsSearch with different query prefixes
+    // to extract ALL members. Empty query + alphabet letters covers everyone.
+    const searchQueries = [
+      '', // empty query gets a batch
+      'a','b','c','d','e','f','g','h','i','j','k','l','m',
+      'n','o','p','q','r','s','t','u','v','w','x','y','z',
+      '0','1','2','3','4','5','6','7','8','9',
+      // Arabic letters for Arabic-named users
+      'ا','ب','ت','ث','ج','ح','خ','د','ذ','ر','ز','س','ش',
+      'ص','ض','ط','ظ','ع','غ','ف','ق','ك','ل','م','ن','ه','و','ي',
+    ];
 
-    const users = participants.users || [];
+    const allMembers = new Map(); // id -> member object (dedup)
 
-    const members = users.map((p) => ({
-      id: p.id?.toString(),
-      username: p.username || '',
-      firstName: p.firstName || '',
-      lastName: p.lastName || '',
-      phone: p.phone || '',
-    })).filter((m) => Boolean(m.id));
+    for (const q of searchQueries) {
+      let searchOffset = 0;
+      const batchSize = 200;
 
-    const hasMore = users.length === batchSize;
-    const nextOffset = batchOffset + users.length;
+      while (true) {
+        try {
+          const participants = await client.invoke(
+            new Api.channels.GetParticipants({
+              channel: entity,
+              filter: new Api.ChannelParticipantsSearch({ q }),
+              offset: searchOffset,
+              limit: batchSize,
+              hash: BigInt(0),
+            })
+          );
+
+          const users = participants.users || [];
+          if (users.length === 0) break;
+
+          for (const p of users) {
+            const id = p.id?.toString();
+            if (id && !allMembers.has(id)) {
+              allMembers.set(id, {
+                id,
+                username: p.username || '',
+                firstName: p.firstName || '',
+                lastName: p.lastName || '',
+                phone: p.phone || '',
+              });
+            }
+          }
+
+          // If we got fewer than batchSize, no more results for this query
+          if (users.length < batchSize) break;
+
+          searchOffset += users.length;
+
+          // Small delay to avoid FLOOD
+          await new Promise(r => setTimeout(r, 300));
+        } catch (err) {
+          const msg = err.message || '';
+          if (msg.includes('FLOOD')) {
+            // Wait and continue with next query
+            const waitMatch = msg.match(/FLOOD_WAIT[_\s]*(\d+)/i);
+            const waitSec = waitMatch ? parseInt(waitMatch[1]) : 5;
+            console.log(`FLOOD_WAIT ${waitSec}s during search q="${q}", waiting...`);
+            await new Promise(r => setTimeout(r, waitSec * 1000));
+          }
+          break; // Move to next query letter
+        }
+      }
+    }
+
+    const members = Array.from(allMembers.values());
 
     await client.disconnect();
+
+    console.log(`Extracted ${members.length} total unique members from ${value}`);
 
     return res.json({
       success: true,
       members,
       count: members.length,
-      offset: batchOffset,
-      limit: batchSize,
-      hasMore,
-      nextOffset,
+      hasMore: false, // All members extracted in one go
+      nextOffset: 0,
     });
 
   } catch (error) {
