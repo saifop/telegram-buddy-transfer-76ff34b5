@@ -106,7 +106,9 @@ Deno.serve(async (req) => {
       console.log(`Using external MTProto service: ${mtprotoServiceUrl}`);
       try {
         const controller = new AbortController();
-        const timeoutMs = 20_000;
+        // Give extraction/join actions more time (120s), others 30s
+        const longActions = ["getGroupMembers", "joinGroup", "addMemberToGroup"];
+        const timeoutMs = longActions.includes(action) ? 120_000 : 30_000;
         const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
         const response = await fetch(mtprotoServiceUrl, {
