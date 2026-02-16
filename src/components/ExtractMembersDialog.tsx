@@ -108,63 +108,99 @@ export function ExtractMembersDialog({
 
     try {
       addLog("info", `جاري استخراج جميع الأعضاء من: ${sourceGroup}`);
-      setExtractionStatus("جاري جلب الأعضاء على دفعات...");
 
       const allMembers: any[] = [];
       const seenIds = new Set<string>();
-      const limit = 200;
-      let offset = 0;
-      let hasMore = true;
-      let safetyBatches = 0;
 
-      while (hasMore) {
-        safetyBatches++;
-        if (safetyBatches > 1000) {
-          throw new Error("توقف أمان: تجاوز الحد الأقصى للدفعات");
-        }
+      // Step 1: Initial request - gets first batch + list of remaining queries
+      setExtractionStatus("جاري بدء الاستخراج...");
+      const { data: initData, error: initError } = await supabase.functions.invoke("telegram-auth", {
+        body: {
+          action: "getGroupMembers",
+          sessionString: account.sessionString,
+          groupLink: sourceGroup,
+          apiId: account.apiId,
+          apiHash: account.apiHash,
+        },
+      });
 
-        const { data, error: funcError } = await supabase.functions.invoke("telegram-auth", {
-          body: {
-            action: "getGroupMembers",
-            sessionString: account.sessionString,
-            groupLink: sourceGroup,
-            apiId: account.apiId,
-            apiHash: account.apiHash,
-            limit,
-            offset,
-          },
-        });
+      if (initError) throw initError;
+      if (initData?.error) throw new Error(initData.error);
 
-        if (funcError) throw funcError;
-
-        if (data?.error) {
-          throw new Error(data.error);
-        }
-
-        const batch = Array.isArray(data?.members) ? data.members : [];
-        for (const m of batch) {
-          const id = m?.id?.toString?.() ?? String(m?.id ?? "");
-          if (!id || seenIds.has(id)) continue;
+      // Collect initial members
+      const initMembers = Array.isArray(initData?.members) ? initData.members : [];
+      for (const m of initMembers) {
+        const id = m?.id?.toString?.() ?? "";
+        if (id && !seenIds.has(id)) {
           seenIds.add(id);
           allMembers.push(m);
         }
-
-        hasMore = Boolean(data?.hasMore) && batch.length > 0;
-        offset = typeof data?.nextOffset === "number" ? data.nextOffset : offset + batch.length;
-
-        setExtractionStatus(`تم جلب ${allMembers.length} عضو...`);
-        setProgress(Math.min(99, Math.round((safetyBatches / 20) * 100))); // تقدّم تقريبي
-
-        // تهدئة بسيطة لتجنب FLOOD
-        await new Promise((r) => setTimeout(r, 1200));
       }
 
-      const members = allMembers;
+      const remainingQueries: string[] = Array.isArray(initData?.remainingQueries) ? initData.remainingQueries : [];
+      const totalQueries = remainingQueries.length + 1;
 
-      // Deduplicate just in case
+      setExtractionStatus(`تم جلب ${allMembers.length} عضو... (1/${totalQueries})`);
+      setProgress(Math.round((1 / totalQueries) * 100));
+
+      // Step 2: Iterate through remaining search queries one by one
+      for (let i = 0; i < remainingQueries.length; i++) {
+        const q = remainingQueries[i];
+        const queryNum = i + 2;
+
+        try {
+          const { data, error: funcError } = await supabase.functions.invoke("telegram-auth", {
+            body: {
+              action: "getGroupMembers",
+              sessionString: account.sessionString,
+              groupLink: sourceGroup,
+              apiId: account.apiId,
+              apiHash: account.apiHash,
+              searchQuery: q,
+              knownIds: Array.from(seenIds),
+            },
+          });
+
+          if (funcError) {
+            addLog("warning", `خطأ في استعلام "${q}": ${funcError.message}`);
+            continue;
+          }
+
+          if (data?.error) {
+            // If flood, wait and continue
+            if (data.error.includes("تجاوز الحد") || data.error.includes("FLOOD")) {
+              addLog("warning", `تجاوز الحد عند "${q}"، متابعة...`);
+              await new Promise(r => setTimeout(r, 5000));
+              continue;
+            }
+            addLog("warning", `خطأ في "${q}": ${data.error}`);
+            continue;
+          }
+
+          const batch = Array.isArray(data?.members) ? data.members : [];
+          for (const m of batch) {
+            const id = m?.id?.toString?.() ?? "";
+            if (id && !seenIds.has(id)) {
+              seenIds.add(id);
+              allMembers.push(m);
+            }
+          }
+        } catch (err: any) {
+          addLog("warning", `خطأ في استعلام "${q}": ${err.message}`);
+          continue;
+        }
+
+        setExtractionStatus(`تم جلب ${allMembers.length} عضو... (${queryNum}/${totalQueries})`);
+        setProgress(Math.round((queryNum / totalQueries) * 100));
+
+        // Small delay between queries
+        await new Promise(r => setTimeout(r, 500));
+      }
+
+      // Deduplicate and format
       const seenIds2 = new Set<string>();
       const uniqueMembers: ExtractedMember[] = [];
-      for (const m of members) {
+      for (const m of allMembers) {
         const oderId = m.id?.toString() || "";
         if (!oderId || seenIds2.has(oderId)) continue;
         seenIds2.add(oderId);
