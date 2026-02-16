@@ -588,11 +588,12 @@ async function extractForQuery(client, entity, q, skipIds) {
 
       for (const p of users) {
         const id = p.id?.toString();
-        if (id && !skipIds.has(id)) {
+        // Only include members who have a username
+        if (id && !skipIds.has(id) && p.username && p.username.trim()) {
           skipIds.add(id);
           members.push({
             id,
-            username: p.username || '',
+            username: p.username,
             firstName: p.firstName || '',
             lastName: p.lastName || '',
             phone: p.phone || '',
