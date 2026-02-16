@@ -507,10 +507,8 @@ export function useAutoAddMembers({
 
         // === PHASE 3: Add remaining members ===
         addLog("info", `📤 بدء إضافة ${membersToAdd.length} عضو...`);
-        let memberRetryCount = 0;
 
         for (let i = 0; i < membersToAdd.length && !abortRef.current; i++) {
-          memberRetryCount = 0;
           // Check pause
           while (pauseRef.current && !abortRef.current) {
             await sleep(500);
@@ -533,68 +531,65 @@ export function useAutoAddMembers({
             continue;
           }
 
-          let account = getNextAccount(activeAccounts);
-          if (!account) {
-            addLog("error", "لا يوجد حسابات متاحة للإضافة");
-            break;
-          }
-          
-          addLog("info", `إضافة: ${member.username}`, account.phone);
-          const result = await addMember(member, account, currentSourceGroup);
+          let memberDone = false;
+          let accountRetries = 0;
+          const maxAccountRetries = activeAccounts.length;
 
-          if (result.success) {
-            onUpdateMemberStatus(member.id, "added");
-            batchAdded++;
-            statsRef.current.totalAdded++;
-            addLog("success", `تمت إضافة: ${member.username}`, account.phone);
-            rotateToNextAccount(activeAccounts);
-          } else if (result.banned) {
-            memberRetryCount++;
-            if (memberRetryCount >= activeAccounts.length) {
-              onUpdateMemberStatus(member.id, "failed", "كل الحسابات محظورة");
+          while (!memberDone && accountRetries < maxAccountRetries && !abortRef.current) {
+            const account = getNextAccount(activeAccounts);
+            if (!account) {
+              addLog("error", "لا يوجد حسابات متاحة للإضافة");
+              memberDone = true;
+              onUpdateMemberStatus(member.id, "failed", "لا يوجد حسابات متاحة");
               batchFailed++;
               statsRef.current.totalFailed++;
-              addLog("error", `❌ فشل إضافة ${member.username} - كل الحسابات غير متاحة`);
-            } else {
+              break;
+            }
+            
+            addLog("info", `إضافة: @${member.username}`, account.phone);
+            const result = await addMember(member, account, currentSourceGroup);
+
+            if (result.success) {
+              onUpdateMemberStatus(member.id, "added");
+              batchAdded++;
+              statsRef.current.totalAdded++;
+              addLog("success", `✅ تمت إضافة: @${member.username}`, account.phone);
+              rotateToNextAccount(activeAccounts);
+              memberDone = true;
+            } else if (result.skip) {
+              onUpdateMemberStatus(member.id, "skipped", result.error);
+              batchSkipped++;
+              statsRef.current.totalSkipped++;
+              addLog("info", `⏭️ تخطي: @${member.username} - ${result.error}`);
+              memberDone = true;
+            } else if (result.banned) {
               onUpdateAccountStatus?.(account.id, "banned", "محظور");
-              addLog("error", `⛔ ${account.phone} محظور - إعادة محاولة العضو بالحساب التالي`);
+              addLog("error", `⛔ ${account.phone} محظور - إعادة محاولة بالحساب التالي`);
               rotateToNextAccount(activeAccounts);
-              i--; // retry same member
+              accountRetries++;
               await sleep(2000);
-            }
-          } else if (result.floodWait) {
-            memberRetryCount++;
-            if (memberRetryCount >= activeAccounts.length) {
-              onUpdateMemberStatus(member.id, "failed", "كل الحسابات مقيدة");
-              batchFailed++;
-              statsRef.current.totalFailed++;
-              addLog("error", `❌ فشل إضافة ${member.username} - كل الحسابات مقيدة`);
+            } else if (result.floodWait) {
+              const waitSec = result.floodWait;
+              addLog("warning", `⚠️ Flood Wait ${waitSec}s على ${account.phone} - ينتظر ثم يعيد`, account.phone);
+              onUpdateAccountStatus?.(account.id, "flood", `انتظار ${waitSec}s`);
+              // Wait the flood time then retry with SAME account
+              await sleep(waitSec * 1000);
+              onUpdateAccountStatus?.(account.id, "connected", undefined);
+              addLog("info", `✅ ${account.phone} - استئناف بعد Flood Wait`);
+              accountRetries++;
             } else {
-              addLog("warning", `Flood على ${account.phone} - إعادة بالحساب التالي`, account.phone);
-              onUpdateAccountStatus?.(account.id, "flood", `انتظار ${result.floodWait}s`);
+              addLog("warning", `فشل: @${member.username} بحساب ${account.phone} - إعادة بالتالي`);
               rotateToNextAccount(activeAccounts);
-              i--; // retry same member
-              await sleep(1000);
+              accountRetries++;
+              await sleep(3000);
             }
-          } else if (result.skip) {
-            onUpdateMemberStatus(member.id, "skipped", result.error);
-            batchSkipped++;
-            statsRef.current.totalSkipped++;
-            addLog("info", `تخطي: ${member.username} - ${result.error}`);
-          } else {
-            memberRetryCount++;
-            if (memberRetryCount >= activeAccounts.length) {
-              onUpdateMemberStatus(member.id, "failed", result.error);
-              batchFailed++;
-              statsRef.current.totalFailed++;
-              addLog("error", `❌ فشل إضافة ${member.username} - استنفذت كل الحسابات`);
-            } else {
-              addLog("warning", `فشل: ${member.username} بحساب ${account.phone} - إعادة بالتالي`);
-              onUpdateAccountStatus?.(account.id, "flood", result.error || "خطأ");
-              rotateToNextAccount(activeAccounts);
-              i--; // retry same member
-              await sleep(2000);
-            }
+          }
+
+          if (!memberDone) {
+            onUpdateMemberStatus(member.id, "failed", "استنفذت كل الحسابات");
+            batchFailed++;
+            statsRef.current.totalFailed++;
+            addLog("error", `❌ فشل إضافة @${member.username} - استنفذت كل الحسابات`);
           }
 
           onUpdateProgress({

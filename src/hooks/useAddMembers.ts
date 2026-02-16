@@ -258,68 +258,83 @@ export function useAddMembers({
         const now = Date.now();
         if (now < worker.pausedUntil) {
           const remainingSec = Math.ceil((worker.pausedUntil - now) / 1000);
-          // Wait and check periodically
-          await sleep(5000);
+          addLog("info", `⏳ ${worker.account.phone} - انتظار ${remainingSec} ثانية...`);
+          await sleep(Math.min(10000, worker.pausedUntil - now));
           continue;
         } else {
           // Flood wait ended, resume
           worker.pausedUntil = null;
           onUpdateAccountStatus?.(worker.account.id, "connected", undefined);
-          addLog("success", `انتهى وقت الانتظار - استئناف الإضافة`, worker.account.phone);
+          addLog("success", `✅ ${worker.account.phone} - انتهى وقت الانتظار، استئناف`);
         }
       }
 
       // Get next member to process
       const member = getNextMember();
-      if (!member) {
-        // No more members
-        break;
-      }
+      if (!member) break;
 
       // Skip members without username
       if (!member.username || !member.username.trim()) {
-        const msg = "لا يمكن إضافة هذا العضو لأنه لا يملك username";
-        onUpdateMemberStatus(member.id, "failed", msg);
-        addLog("warning", msg, worker.account.phone);
+        onUpdateMemberStatus(member.id, "failed", "لا يملك username");
         onMemberProcessed();
         continue;
       }
 
-      addLog("info", `جاري إضافة: ${member.username || member.firstName}`, worker.account.phone);
+      addLog("info", `جاري إضافة: @${member.username}`, worker.account.phone);
 
-      const result = await addMemberWithAccount(member, worker.account);
+      let retries = 0;
+      const maxRetries = settings.maxRetries || 2;
+      let success = false;
 
-      if (result.success) {
-        onUpdateMemberStatus(member.id, "added");
-        worker.addedCount++;
-        addLog("success", `تمت إضافة: ${member.username || member.firstName}`, worker.account.phone);
-      } else if (result.error?.includes("موجود مسبقاً")) {
-        // USER_ALREADY_PARTICIPANT — not a real add, mark as skipped
-        onUpdateMemberStatus(member.id, "skipped", "موجود مسبقاً في المجموعة");
-        addLog("info", `⏭️ ${member.username || member.firstName} موجود مسبقاً`, worker.account.phone);
-      } else if (result.floodWait) {
-        // Put member back? No, mark as failed for this attempt
-        onUpdateMemberStatus(member.id, "failed", result.error);
-        addLog("warning", `تحذير Flood - انتظار ${result.floodWait} ثانية`, worker.account.phone);
-        
-        // Pause this account
-        worker.pausedUntil = Date.now() + (result.floodWait * 1000);
-        onUpdateAccountStatus?.(worker.account.id, "flood", `انتظار ${result.floodWait} ثانية`);
-      } else if (result.isBanned) {
-        onUpdateMemberStatus(member.id, "failed", result.error);
-        onUpdateAccountStatus?.(worker.account.id, "banned", result.error);
-        addLog("error", `الحساب محظور: ${worker.account.phone}`, worker.account.phone);
-        
-        // Stop this worker if banned
-        break;
-      } else {
-        onUpdateMemberStatus(member.id, "failed", result.error);
-        addLog("error", `فشل إضافة ${member.username || member.firstName}: ${result.error}`, worker.account.phone);
+      while (retries <= maxRetries && !abortRef.current && !success) {
+        const result = await addMemberWithAccount(member, worker.account);
+
+        if (result.success) {
+          onUpdateMemberStatus(member.id, "added");
+          worker.addedCount++;
+          addLog("success", `✅ تمت إضافة: @${member.username}`, worker.account.phone);
+          success = true;
+        } else if (result.error?.includes("موجود مسبقاً")) {
+          onUpdateMemberStatus(member.id, "skipped", "موجود مسبقاً في المجموعة");
+          addLog("info", `⏭️ @${member.username} موجود مسبقاً`, worker.account.phone);
+          success = true; // Don't retry
+        } else if (result.floodWait) {
+          const waitSec = result.floodWait;
+          addLog("warning", `⚠️ Flood Wait ${waitSec}s على ${worker.account.phone}`, worker.account.phone);
+          worker.pausedUntil = Date.now() + (waitSec * 1000);
+          onUpdateAccountStatus?.(worker.account.id, "flood", `انتظار ${waitSec} ثانية`);
+          // Don't mark member as failed - it will be picked up after cooldown
+          // Put this member back by not calling onMemberProcessed yet
+          // Wait for the flood to end
+          await sleep(waitSec * 1000);
+          worker.pausedUntil = null;
+          onUpdateAccountStatus?.(worker.account.id, "connected", undefined);
+          addLog("info", `✅ ${worker.account.phone} - استئناف بعد Flood Wait`);
+          retries++;
+        } else if (result.isBanned) {
+          onUpdateMemberStatus(member.id, "failed", result.error);
+          onUpdateAccountStatus?.(worker.account.id, "banned", result.error);
+          addLog("error", `⛔ الحساب ${worker.account.phone} محظور`, worker.account.phone);
+          // Stop this worker permanently
+          worker.isWorking = false;
+          onMemberProcessed();
+          return;
+        } else {
+          // Other errors - retry
+          retries++;
+          if (retries <= maxRetries) {
+            addLog("warning", `إعادة محاولة (${retries}/${maxRetries}): @${member.username}`, worker.account.phone);
+            await sleep(5000);
+          } else {
+            onUpdateMemberStatus(member.id, "failed", result.error);
+            addLog("error", `❌ فشل إضافة @${member.username}: ${result.error}`, worker.account.phone);
+          }
+        }
       }
 
       onMemberProcessed();
 
-      // Delay before next operation
+      // Delay before next operation - use longer delays for safety
       const delay = getRandomDelay();
       await sleep(delay * 1000);
     }
