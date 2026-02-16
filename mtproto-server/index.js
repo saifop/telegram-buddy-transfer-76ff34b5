@@ -483,10 +483,19 @@ async function handleLeaveGroup({ sessionString, groupLink, apiId, apiHash }, re
 /**
  * Get members from a group
  */
-async function handleGetGroupMembers({ sessionString, groupLink, apiId, apiHash, limit, offset }, res) {
+async function handleGetGroupMembers({ sessionString, groupLink, apiId, apiHash, searchQuery: singleQuery, knownIds }, res) {
   if (!sessionString || !groupLink) {
     return res.status(400).json({ error: 'Missing required parameters' });
   }
+
+  // Full list of search queries for exhaustive extraction
+  const ALL_QUERIES = [
+    '', 'a','b','c','d','e','f','g','h','i','j','k','l','m',
+    'n','o','p','q','r','s','t','u','v','w','x','y','z',
+    '0','1','2','3','4','5','6','7','8','9',
+    'ا','ب','ت','ث','ج','ح','خ','د','ذ','ر','ز','س','ش',
+    'ص','ض','ط','ظ','ع','غ','ف','ق','ك','ل','م','ن','ه','و','ي',
+  ];
 
   let client;
 
@@ -494,95 +503,42 @@ async function handleGetGroupMembers({ sessionString, groupLink, apiId, apiHash,
     client = await getClientFromSession(sessionString, apiId || 123456, apiHash || 'demo');
 
     const { value } = parseGroupLink(groupLink);
-
     if (!value) {
       return res.status(400).json({ error: 'Invalid group link' });
     }
 
-    console.log(`Getting ALL members from group: ${value}`);
-
-    // Get the channel/group entity
     const entity = await client.getEntity(value);
 
-    // Strategy: Use ChannelParticipantsSearch with different query prefixes
-    // to extract ALL members. Empty query + alphabet letters covers everyone.
-    const searchQueries = [
-      '', // empty query gets a batch
-      'a','b','c','d','e','f','g','h','i','j','k','l','m',
-      'n','o','p','q','r','s','t','u','v','w','x','y','z',
-      '0','1','2','3','4','5','6','7','8','9',
-      // Arabic letters for Arabic-named users
-      'ا','ب','ت','ث','ج','ح','خ','د','ذ','ر','ز','س','ش',
-      'ص','ض','ط','ظ','ع','غ','ف','ق','ك','ل','م','ن','ه','و','ي',
-    ];
+    // If singleQuery is provided, only process that one query letter
+    // Otherwise return the list of queries for the client to iterate
+    if (singleQuery === undefined || singleQuery === null) {
+      // Return the query plan so the client knows what to iterate
+      // Also do the first empty-string query
+      const firstQuery = '';
+      const members = await extractForQuery(client, entity, firstQuery, new Set(knownIds || []));
+      await client.disconnect();
 
-    const allMembers = new Map(); // id -> member object (dedup)
-
-    for (const q of searchQueries) {
-      let searchOffset = 0;
-      const batchSize = 200;
-
-      while (true) {
-        try {
-          const participants = await client.invoke(
-            new Api.channels.GetParticipants({
-              channel: entity,
-              filter: new Api.ChannelParticipantsSearch({ q }),
-              offset: searchOffset,
-              limit: batchSize,
-              hash: BigInt(0),
-            })
-          );
-
-          const users = participants.users || [];
-          if (users.length === 0) break;
-
-          for (const p of users) {
-            const id = p.id?.toString();
-            if (id && !allMembers.has(id)) {
-              allMembers.set(id, {
-                id,
-                username: p.username || '',
-                firstName: p.firstName || '',
-                lastName: p.lastName || '',
-                phone: p.phone || '',
-              });
-            }
-          }
-
-          // If we got fewer than batchSize, no more results for this query
-          if (users.length < batchSize) break;
-
-          searchOffset += users.length;
-
-          // Small delay to avoid FLOOD
-          await new Promise(r => setTimeout(r, 300));
-        } catch (err) {
-          const msg = err.message || '';
-          if (msg.includes('FLOOD')) {
-            // Wait and continue with next query
-            const waitMatch = msg.match(/FLOOD_WAIT[_\s]*(\d+)/i);
-            const waitSec = waitMatch ? parseInt(waitMatch[1]) : 5;
-            console.log(`FLOOD_WAIT ${waitSec}s during search q="${q}", waiting...`);
-            await new Promise(r => setTimeout(r, waitSec * 1000));
-          }
-          break; // Move to next query letter
-        }
-      }
+      return res.json({
+        success: true,
+        members,
+        count: members.length,
+        currentQuery: firstQuery,
+        remainingQueries: ALL_QUERIES.slice(1), // everything after ''
+        hasMore: true,
+      });
     }
 
-    const members = Array.from(allMembers.values());
-
+    // Process a single search query
+    const skipIds = new Set(knownIds || []);
+    const members = await extractForQuery(client, entity, singleQuery, skipIds);
     await client.disconnect();
-
-    console.log(`Extracted ${members.length} total unique members from ${value}`);
 
     return res.json({
       success: true,
       members,
       count: members.length,
-      hasMore: false, // All members extracted in one go
-      nextOffset: 0,
+      currentQuery: singleQuery,
+      hasMore: false, // client manages the queue
     });
 
   } catch (error) {
@@ -605,6 +561,64 @@ async function handleGetGroupMembers({ sessionString, groupLink, apiId, apiHash,
       if (client) await client.disconnect();
     } catch {}
   }
+}
+
+/**
+ * Extract members for a single search query prefix
+ */
+async function extractForQuery(client, entity, q, skipIds) {
+  const members = [];
+  let searchOffset = 0;
+  const batchSize = 200;
+
+  while (true) {
+    try {
+      const participants = await client.invoke(
+        new Api.channels.GetParticipants({
+          channel: entity,
+          filter: new Api.ChannelParticipantsSearch({ q }),
+          offset: searchOffset,
+          limit: batchSize,
+          hash: BigInt(0),
+        })
+      );
+
+      const users = participants.users || [];
+      if (users.length === 0) break;
+
+      for (const p of users) {
+        const id = p.id?.toString();
+        if (id && !skipIds.has(id)) {
+          skipIds.add(id);
+          members.push({
+            id,
+            username: p.username || '',
+            firstName: p.firstName || '',
+            lastName: p.lastName || '',
+            phone: p.phone || '',
+          });
+        }
+      }
+
+      if (users.length < batchSize) break;
+      searchOffset += users.length;
+
+      await new Promise(r => setTimeout(r, 300));
+    } catch (err) {
+      const msg = err.message || '';
+      if (msg.includes('FLOOD')) {
+        const waitMatch = msg.match(/FLOOD_WAIT[_\s]*(\d+)/i);
+        const waitSec = waitMatch ? parseInt(waitMatch[1]) : 5;
+        console.log(`FLOOD_WAIT ${waitSec}s during search q="${q}", waiting...`);
+        await new Promise(r => setTimeout(r, (waitSec + 1) * 1000));
+        continue; // Retry instead of breaking
+      }
+      break;
+    }
+  }
+
+  console.log(`Query "${q}": found ${members.length} new members`);
+  return members;
 }
 
 /**
