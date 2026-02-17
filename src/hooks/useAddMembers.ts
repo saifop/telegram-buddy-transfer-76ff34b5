@@ -193,6 +193,7 @@ export function useAddMembers({
           sourceGroup: settings.sourceGroup,
           userId: member.oderId,
           username: member.username,
+          accessHash: (member as any).accessHash || "",
           apiId: account.apiId,
           apiHash: account.apiHash,
         },
@@ -280,14 +281,8 @@ export function useAddMembers({
       const member = getNextMember();
       if (!member) break;
 
-      // Skip members without username
-      if (!member.username || !member.username.trim()) {
-        onUpdateMemberStatus(member.id, "failed", "لا يملك username");
-        onMemberProcessed();
-        continue;
-      }
-
-      addLog("info", `جاري إضافة: @${member.username}`, worker.account.phone);
+      const memberLabel = member.username ? `@${member.username}` : (member.firstName || `ID:${member.oderId}`);
+      addLog("info", `جاري إضافة: ${memberLabel}`, worker.account.phone);
 
       let retries = 0;
       const maxRetries = settings.maxRetries || 2;
@@ -299,20 +294,17 @@ export function useAddMembers({
         if (result.success) {
           onUpdateMemberStatus(member.id, "added");
           worker.addedCount++;
-          addLog("success", `✅ تمت إضافة: @${member.username}`, worker.account.phone);
+          addLog("success", `✅ تمت إضافة: ${memberLabel}`, worker.account.phone);
           success = true;
         } else if (result.error?.includes("موجود مسبقاً")) {
           onUpdateMemberStatus(member.id, "skipped", "موجود مسبقاً في المجموعة");
-          addLog("info", `⏭️ @${member.username} موجود مسبقاً`, worker.account.phone);
+          addLog("info", `⏭️ ${memberLabel} موجود مسبقاً`, worker.account.phone);
           success = true; // Don't retry
         } else if (result.floodWait) {
           const waitSec = result.floodWait;
           addLog("warning", `⚠️ Flood Wait ${waitSec}s على ${worker.account.phone}`, worker.account.phone);
           worker.pausedUntil = Date.now() + (waitSec * 1000);
           onUpdateAccountStatus?.(worker.account.id, "flood", `انتظار ${waitSec} ثانية`);
-          // Don't mark member as failed - it will be picked up after cooldown
-          // Put this member back by not calling onMemberProcessed yet
-          // Wait for the flood to end
           await sleep(waitSec * 1000);
           worker.pausedUntil = null;
           onUpdateAccountStatus?.(worker.account.id, "connected", undefined);
@@ -322,19 +314,17 @@ export function useAddMembers({
           onUpdateMemberStatus(member.id, "failed", result.error);
           onUpdateAccountStatus?.(worker.account.id, "banned", result.error);
           addLog("error", `⛔ الحساب ${worker.account.phone} محظور`, worker.account.phone);
-          // Stop this worker permanently
           worker.isWorking = false;
           onMemberProcessed();
           return;
         } else {
-          // Other errors - retry
           retries++;
           if (retries <= maxRetries) {
-            addLog("warning", `إعادة محاولة (${retries}/${maxRetries}): @${member.username}`, worker.account.phone);
+            addLog("warning", `إعادة محاولة (${retries}/${maxRetries}): ${memberLabel}`, worker.account.phone);
             await sleep(5000);
           } else {
             onUpdateMemberStatus(member.id, "failed", result.error);
-            addLog("error", `❌ فشل إضافة @${member.username}: ${result.error}`, worker.account.phone);
+            addLog("error", `❌ فشل إضافة ${memberLabel}: ${result.error}`, worker.account.phone);
           }
         }
       }

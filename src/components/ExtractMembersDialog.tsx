@@ -42,6 +42,7 @@ interface ExtractedMember {
   firstName?: string;
   lastName?: string;
   phone?: string;
+  accessHash?: string;
   isSelected: boolean;
 }
 
@@ -197,27 +198,25 @@ export function ExtractMembersDialog({
         await new Promise(r => setTimeout(r, 500));
       }
 
-      // Deduplicate and format - only keep members with username
+      // Deduplicate and format - include ALL members (with and without username)
       const seenIds2 = new Set<string>();
       const uniqueMembers: ExtractedMember[] = [];
-      let skippedNoUsername = 0;
+      let withUsername = 0;
+      let withoutUsername = 0;
       for (const m of allMembers) {
         const oderId = m.id?.toString() || "";
         if (!oderId || seenIds2.has(oderId)) continue;
-        // Skip members without username
-        const username = m.username || "";
-        if (!username.trim()) {
-          skippedNoUsername++;
-          continue;
-        }
         seenIds2.add(oderId);
+        const hasUsername = !!(m.username && m.username.trim());
+        if (hasUsername) withUsername++; else withoutUsername++;
         uniqueMembers.push({
           id: crypto.randomUUID(),
           oderId,
-          username,
+          username: m.username || "",
           firstName: m.first_name || m.firstName,
           lastName: m.last_name || m.lastName,
           phone: m.phone,
+          accessHash: m.accessHash || "",
           isSelected: true,
         });
       }
@@ -226,7 +225,7 @@ export function ExtractMembersDialog({
       setExtractionStatus("");
       setExtractedMembers(uniqueMembers);
       setStep("preview");
-      addLog("success", `تم استخراج ${uniqueMembers.length} عضو (لديهم username) - تم تخطي ${skippedNoUsername} بدون username`);
+      addLog("success", `تم استخراج ${uniqueMembers.length} عضو (${withUsername} بيوزرنيم، ${withoutUsername} بدون يوزرنيم)`);
     } catch (err: any) {
       console.error("Extraction error:", err);
       setError(err.message || "فشل في استخراج الأعضاء");
@@ -262,6 +261,7 @@ export function ExtractMembersDialog({
         firstName: m.firstName,
         lastName: m.lastName,
         phone: m.phone,
+        accessHash: m.accessHash,
         isSelected: true,
         status: "pending" as const,
       }));
