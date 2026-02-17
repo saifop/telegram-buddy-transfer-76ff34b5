@@ -588,15 +588,15 @@ async function extractForQuery(client, entity, q, skipIds) {
 
       for (const p of users) {
         const id = p.id?.toString();
-        // Only include members who have a username
-        if (id && !skipIds.has(id) && p.username && p.username.trim()) {
+        if (id && !skipIds.has(id)) {
           skipIds.add(id);
           members.push({
             id,
-            username: p.username,
+            username: p.username || '',
             firstName: p.firstName || '',
             lastName: p.lastName || '',
             phone: p.phone || '',
+            accessHash: p.accessHash?.toString() || '',
           });
         }
       }
@@ -625,7 +625,7 @@ async function extractForQuery(client, entity, q, skipIds) {
 /**
  * Add a member to a group
  */
-async function handleAddMemberToGroup({ sessionString, groupLink, userId, username, sourceGroup, apiId, apiHash }, res) {
+async function handleAddMemberToGroup({ sessionString, groupLink, userId, username, sourceGroup, accessHash, apiId, apiHash }, res) {
   if (!sessionString || !groupLink || (!userId && !username)) {
     return res.status(400).json({ error: 'Missing required parameters' });
   }
@@ -657,28 +657,49 @@ async function handleAddMemberToGroup({ sessionString, groupLink, userId, userna
       }
     }
     
-    // Priority 2: Try to resolve from source group (caches access_hash properly)
+    // Priority 2: Try to resolve from source group by searching multiple queries
     if (!userEntity && sourceGroup && userId) {
       try {
         const { value: sourceValue } = parseGroupLink(sourceGroup);
         if (sourceValue) {
           const sourceChannel = await client.getEntity(sourceValue);
-          // Search with username prefix to find the specific user
-          const searchQ = username ? username.substring(0, 5) : '';
-          const participants = await client.invoke(
-            new Api.channels.GetParticipants({
-              channel: sourceChannel,
-              filter: new Api.ChannelParticipantsSearch({ q: searchQ }),
-              offset: 0,
-              limit: 200,
-              hash: BigInt(0),
-            })
-          );
           
-          const foundUser = participants.users.find(u => u.id.toString() === userId.toString());
-          if (foundUser) {
-            userEntity = foundUser;
-            console.log(`Found user in source group: ${userId} (accessHash: ${foundUser.accessHash})`);
+          // Try multiple search strategies to find user by ID
+          const searchQueries = [];
+          if (username && username.trim()) {
+            searchQueries.push(username.substring(0, 5));
+          }
+          // Search with empty string to get recent/default list
+          searchQueries.push('');
+          // Also try first name characters if we have them
+          
+          for (const searchQ of searchQueries) {
+            if (userEntity) break;
+            let offset = 0;
+            let attempts = 0;
+            while (attempts < 5) {
+              attempts++;
+              const participants = await client.invoke(
+                new Api.channels.GetParticipants({
+                  channel: sourceChannel,
+                  filter: new Api.ChannelParticipantsSearch({ q: searchQ }),
+                  offset,
+                  limit: 200,
+                  hash: BigInt(0),
+                })
+              );
+              
+              const foundUser = participants.users.find(u => u.id.toString() === userId.toString());
+              if (foundUser) {
+                userEntity = foundUser;
+                console.log(`Found user in source group: ${userId} (accessHash: ${foundUser.accessHash})`);
+                break;
+              }
+              
+              if (!participants.users || participants.users.length < 200) break;
+              offset += participants.users.length;
+              await new Promise(r => setTimeout(r, 300));
+            }
           }
         }
       } catch (e) {
@@ -686,13 +707,23 @@ async function handleAddMemberToGroup({ sessionString, groupLink, userId, userna
       }
     }
     
-    // DO NOT use InputPeerUser with accessHash=0 — it silently fails
-    // If we can't find the user entity with a valid access_hash, fail explicitly
+    // Priority 3: Try InputPeerUser with accessHash from extraction (if provided)
+    if (!userEntity && userId && accessHash && accessHash !== '0' && accessHash !== '') {
+      try {
+        userEntity = new Api.InputPeerUser({
+          userId: BigInt(userId),
+          accessHash: BigInt(accessHash),
+        });
+        console.log(`Using stored accessHash for user ${userId}`);
+      } catch (e) {
+        console.log(`Failed to create InputPeerUser: ${e.message}`);
+      }
+    }
     
     if (!userEntity) {
       await client.disconnect();
       return res.status(400).json({ 
-        error: 'USER_ID_INVALID: لا يمكن العثور على المستخدم. تأكد من أن لديه username' 
+        error: 'USER_ID_INVALID: لا يمكن العثور على المستخدم' 
       });
     }
     

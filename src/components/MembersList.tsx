@@ -23,6 +23,7 @@ export interface Member {
   firstName?: string;
   lastName?: string;
   phone?: string;
+  accessHash?: string;
   isSelected: boolean;
   status: "pending" | "added" | "failed" | "skipped" | "banned";
   errorMessage?: string;
