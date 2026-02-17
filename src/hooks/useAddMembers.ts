@@ -202,11 +202,18 @@ export function useAddMembers({
         return { success: false, error: error.message || "فشل في الاتصال بالخادم" };
       }
 
-      if (data?.success) {
-        // Check for USER_ALREADY_PARTICIPANT returned as "success" — treat as skip
-        if (data?.alreadyParticipant) {
-          return { success: false, error: "العضو موجود مسبقاً في المجموعة" };
-        }
+      // Check alreadyParticipant flag (server may return success:true or success:false with this)
+      if (data?.alreadyParticipant) {
+        return { success: false, error: "العضو موجود مسبقاً في المجموعة" };
+      }
+
+      if (data?.success && data?.actuallyAdded) {
+        return { success: true };
+      }
+
+      // If server said success but no actuallyAdded flag, treat with caution
+      if (data?.success && !data?.actuallyAdded) {
+        // Old server version or ambiguous — still count as success
         return { success: true };
       }
 
@@ -217,9 +224,9 @@ export function useAddMembers({
         return { success: false, error: "العضو موجود مسبقاً في المجموعة" };
       }
 
-      // Check for flood wait
-      if (errorMsg.toLowerCase().includes("flood") || errorMsg.includes("تم تجاوز الحد") || errorMsg.includes("429")) {
-        const waitSeconds = extractFloodWaitSeconds(errorMsg);
+      // Check for flood wait (also check floodWait field from server)
+      if (data?.floodWait || errorMsg.toLowerCase().includes("flood") || errorMsg.includes("تم تجاوز الحد") || errorMsg.includes("429")) {
+        const waitSeconds = data?.floodWait || extractFloodWaitSeconds(errorMsg);
         return { success: false, floodWait: waitSeconds, error: errorMsg };
       }
 

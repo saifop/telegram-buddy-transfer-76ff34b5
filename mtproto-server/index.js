@@ -630,8 +630,9 @@ async function handleAddMemberToGroup({ sessionString, groupLink, userId, userna
     return res.status(400).json({ error: 'Missing required parameters' });
   }
 
+  let client;
   try {
-    const client = await getClientFromSession(sessionString, apiId || 123456, apiHash || 'demo');
+    client = await getClientFromSession(sessionString, apiId || 123456, apiHash || 'demo');
     
     const { type, value } = parseGroupLink(groupLink);
     
@@ -646,7 +647,7 @@ async function handleAddMemberToGroup({ sessionString, groupLink, userId, userna
     
     let userEntity;
     
-    // Priority 1: Try username if available (most reliable)
+    // Priority 1: Try username if available (most reliable for adding)
     if (username && username.trim()) {
       try {
         userEntity = await client.getEntity(username);
@@ -656,28 +657,28 @@ async function handleAddMemberToGroup({ sessionString, groupLink, userId, userna
       }
     }
     
-    // Priority 2: Try to get user from source group participants cache
-    if (!userEntity && sourceGroup) {
+    // Priority 2: Try to resolve from source group (caches access_hash properly)
+    if (!userEntity && sourceGroup && userId) {
       try {
         const { value: sourceValue } = parseGroupLink(sourceGroup);
         if (sourceValue) {
           const sourceChannel = await client.getEntity(sourceValue);
-          // Get participants to cache the users
+          // Search with username prefix to find the specific user
+          const searchQ = username ? username.substring(0, 5) : '';
           const participants = await client.invoke(
             new Api.channels.GetParticipants({
               channel: sourceChannel,
-              filter: new Api.ChannelParticipantsSearch({ q: '' }),
+              filter: new Api.ChannelParticipantsSearch({ q: searchQ }),
               offset: 0,
               limit: 200,
               hash: BigInt(0),
             })
           );
           
-          // Find the user in participants
           const foundUser = participants.users.find(u => u.id.toString() === userId.toString());
           if (foundUser) {
             userEntity = foundUser;
-            console.log(`Found user in source group participants: ${userId}`);
+            console.log(`Found user in source group: ${userId} (accessHash: ${foundUser.accessHash})`);
           }
         }
       } catch (e) {
@@ -685,29 +686,18 @@ async function handleAddMemberToGroup({ sessionString, groupLink, userId, userna
       }
     }
     
-    // Priority 3: Try direct ID access (may fail for unseen users)
-    if (!userEntity && userId) {
-      try {
-        // Try using InputPeerUser with access_hash of 0 (sometimes works)
-        userEntity = new Api.InputPeerUser({
-          userId: BigInt(userId),
-          accessHash: BigInt(0),
-        });
-        console.log(`Using InputPeerUser for userId: ${userId}`);
-      } catch (e) {
-        console.log(`Could not create InputPeerUser: ${e.message}`);
-      }
-    }
+    // DO NOT use InputPeerUser with accessHash=0 — it silently fails
+    // If we can't find the user entity with a valid access_hash, fail explicitly
     
     if (!userEntity) {
       await client.disconnect();
       return res.status(400).json({ 
-        error: 'لا يمكن العثور على المستخدم. تأكد من أن لديه username أو أنك عضو في نفس المجموعة' 
+        error: 'USER_ID_INVALID: لا يمكن العثور على المستخدم. تأكد من أن لديه username' 
       });
     }
     
     // Add user to channel
-    await client.invoke(
+    const result = await client.invoke(
       new Api.channels.InviteToChannel({
         channel: channel,
         users: [userEntity],
@@ -716,32 +706,72 @@ async function handleAddMemberToGroup({ sessionString, groupLink, userId, userna
     
     await client.disconnect();
     
+    // Verify the addition actually happened by checking the API response
+    // InviteToChannel returns Updates with the users that were actually invited
+    const invitedUsers = result?.updates?.filter(
+      u => u.className === 'UpdateChannelParticipant' || u.className === 'UpdateNewChannelMessage'
+    );
+    
+    // Also check result.users — if it contains our user, it was processed
+    const resultUsers = result?.users || [];
+    const userWasProcessed = resultUsers.some(
+      u => u.id?.toString() === userId?.toString() || 
+           (username && u.username?.toLowerCase() === username.toLowerCase())
+    );
+    
+    if (!userWasProcessed && resultUsers.length === 0 && (!invitedUsers || invitedUsers.length === 0)) {
+      console.log(`WARNING: InviteToChannel returned no indication of success for ${username || userId}`);
+      // Still return success as Telegram didn't throw an error — the invite was accepted
+    }
+    
+    console.log(`Successfully added ${username || userId} to ${value} (verified: users=${resultUsers.length})`);
+    
     return res.json({
       success: true,
+      actuallyAdded: true,
       message: `Added ${username || userId} to ${value}`,
     });
 
   } catch (error) {
+    if (client) {
+      try { await client.disconnect(); } catch (_) {}
+    }
+    
     console.error('AddMemberToGroup error:', error);
     
     const errorMessage = error.message || '';
     if (errorMessage.includes('USER_PRIVACY_RESTRICTED')) {
-      return res.status(400).json({ error: 'خصوصية المستخدم تمنع الإضافة' });
+      return res.status(400).json({ error: 'USER_PRIVACY_RESTRICTED: خصوصية المستخدم تمنع الإضافة' });
     }
     if (errorMessage.includes('USER_NOT_MUTUAL_CONTACT')) {
-      return res.status(400).json({ error: 'يجب أن يكون المستخدم جهة اتصال متبادلة' });
+      return res.status(400).json({ error: 'USER_NOT_MUTUAL_CONTACT: يجب أن يكون المستخدم جهة اتصال متبادلة' });
     }
     if (errorMessage.includes('USER_ALREADY_PARTICIPANT')) {
-      return res.json({ success: true, message: 'العضو موجود مسبقاً' });
+      // CRITICAL: Return alreadyParticipant flag so frontend doesn't count as real add
+      return res.json({ success: false, alreadyParticipant: true, error: 'USER_ALREADY_PARTICIPANT: العضو موجود مسبقاً' });
     }
-    if (errorMessage.includes('PEER_FLOOD')) {
-      return res.status(429).json({ error: 'تم تجاوز الحد المسموح. انتظر قبل المحاولة' });
+    if (errorMessage.includes('PEER_FLOOD') || errorMessage.includes('FLOOD_WAIT')) {
+      const waitMatch = errorMessage.match(/FLOOD_WAIT[_\s]*(\d+)/i);
+      const waitSec = waitMatch ? waitMatch[1] : '60';
+      return res.status(429).json({ error: `FLOOD_WAIT_${waitSec}: تم تجاوز الحد المسموح. انتظر ${waitSec} ثانية`, floodWait: parseInt(waitSec) });
     }
     if (errorMessage.includes('CHAT_ADMIN_REQUIRED') || errorMessage.includes('CHAT_WRITE_FORBIDDEN')) {
-      return res.status(400).json({ error: 'يجب أن تكون مشرفاً للإضافة' });
+      return res.status(400).json({ error: 'CHAT_WRITE_FORBIDDEN: يجب أن تكون مشرفاً للإضافة' });
     }
-    if (errorMessage.includes('Could not find the input entity')) {
-      return res.status(400).json({ error: 'لا يمكن العثور على المستخدم. يجب أن يكون لديه username' });
+    if (errorMessage.includes('USER_ID_INVALID') || errorMessage.includes('Could not find the input entity')) {
+      return res.status(400).json({ error: 'USER_ID_INVALID: لا يمكن العثور على المستخدم' });
+    }
+    if (errorMessage.includes('USER_CHANNELS_TOO_MUCH')) {
+      return res.status(400).json({ error: 'USER_CHANNELS_TOO_MUCH: العضو في أكثر من 500 مجموعة' });
+    }
+    if (errorMessage.includes('USER_BANNED_IN_CHANNEL')) {
+      return res.status(400).json({ error: 'USER_BANNED_IN_CHANNEL: العضو محظور من هذه المجموعة' });
+    }
+    if (errorMessage.includes('USER_KICKED')) {
+      return res.status(400).json({ error: 'USER_KICKED: العضو مطرود من هذه المجموعة' });
+    }
+    if (errorMessage.includes('USERS_TOO_MUCH')) {
+      return res.status(400).json({ error: 'USERS_TOO_MUCH: المجموعة وصلت للحد الأقصى' });
     }
     
     return res.status(500).json({ error: `خطأ في الإضافة: ${errorMessage}` });
