@@ -738,8 +738,12 @@ async function handleAddMemberToGroup({ sessionString, groupLink, userId, userna
     await client.disconnect();
     
     // Verify the addition actually happened by checking the API response
-    // InviteToChannel returns Updates with the users that were actually invited
-    const invitedUsers = result?.updates?.filter(
+    // InviteToChannel returns an Updates object (not an array) — result.updates is the inner array
+    const updatesArray = Array.isArray(result?.updates)
+      ? result.updates
+      : (Array.isArray(result?.updates?.updates) ? result.updates.updates : []);
+    
+    const invitedUsers = updatesArray.filter(
       u => u.className === 'UpdateChannelParticipant' || u.className === 'UpdateNewChannelMessage'
     );
     
@@ -750,7 +754,7 @@ async function handleAddMemberToGroup({ sessionString, groupLink, userId, userna
            (username && u.username?.toLowerCase() === username.toLowerCase())
     );
     
-    if (!userWasProcessed && resultUsers.length === 0 && (!invitedUsers || invitedUsers.length === 0)) {
+    if (!userWasProcessed && resultUsers.length === 0 && invitedUsers.length === 0) {
       console.log(`WARNING: InviteToChannel returned no indication of success for ${username || userId}`);
       // Still return success as Telegram didn't throw an error — the invite was accepted
     }
