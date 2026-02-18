@@ -483,27 +483,12 @@ export function useAutoAddMembers({
         addLog("success", `✅ اكتمل الاستخراج: ${allGroupMembers.length} عضو فريد`);
         onMembersExtracted(allGroupMembers);
 
-        // === PHASE 2: Pre-filter existing members in target group ===
-        const existingTargetMembers = await fetchTargetGroupMembers(activeAccounts[0]);
-        
-        const membersToAdd = allGroupMembers.filter(m => {
-          const idMatch = existingTargetMembers.has(m.oderId);
-          const usernameMatch = m.username && existingTargetMembers.has(m.username.toLowerCase().trim());
-          if (idMatch || usernameMatch) {
-            addedUserIdsRef.current.add(m.oderId);
-            onUpdateMemberStatus(m.id, "skipped", "موجود مسبقاً في المجموعة المستهدفة");
-            return false;
-          }
-          return true;
-        });
+        // === PHASE 2: Add members directly (USER_ALREADY_PARTICIPANT handled per-member) ===
+        const membersToAdd = allGroupMembers.filter(m => !addedUserIdsRef.current.has(m.oderId));
 
-        const preSkipped = allGroupMembers.length - membersToAdd.length;
         let batchAdded = 0;
         let batchFailed = 0;
-        let batchSkipped = preSkipped;
-        if (preSkipped > 0) {
-          statsRef.current.totalSkipped += preSkipped;
-        }
+        let batchSkipped = 0;
 
         // === PHASE 3: Add remaining members ===
         addLog("info", `📤 بدء إضافة ${membersToAdd.length} عضو...`);
@@ -522,14 +507,8 @@ export function useAutoAddMembers({
             batchSkipped++;
             continue;
           }
-          
-          // Skip members without username
-          if (!member.username?.trim()) {
-            onUpdateMemberStatus(member.id, "failed", "لا يملك username");
-            batchSkipped++;
-            statsRef.current.totalSkipped++;
-            continue;
-          }
+
+          const memberLabel = member.username ? `@${member.username}` : (member.firstName || `ID:${member.oderId}`);
 
           let memberDone = false;
           let accountRetries = 0;
@@ -546,21 +525,21 @@ export function useAutoAddMembers({
               break;
             }
             
-            addLog("info", `إضافة: @${member.username}`, account.phone);
+            addLog("info", `إضافة: ${memberLabel}`, account.phone);
             const result = await addMember(member, account, currentSourceGroup);
 
             if (result.success) {
               onUpdateMemberStatus(member.id, "added");
               batchAdded++;
               statsRef.current.totalAdded++;
-              addLog("success", `✅ تمت إضافة: @${member.username}`, account.phone);
+              addLog("success", `✅ تمت إضافة: ${memberLabel}`, account.phone);
               rotateToNextAccount(activeAccounts);
               memberDone = true;
             } else if (result.skip) {
               onUpdateMemberStatus(member.id, "skipped", result.error);
               batchSkipped++;
               statsRef.current.totalSkipped++;
-              addLog("info", `⏭️ تخطي: @${member.username} - ${result.error}`);
+              addLog("info", `⏭️ تخطي: ${memberLabel} - ${result.error}`);
               memberDone = true;
             } else if (result.banned) {
               onUpdateAccountStatus?.(account.id, "banned", "محظور");
@@ -578,7 +557,7 @@ export function useAutoAddMembers({
               addLog("info", `✅ ${account.phone} - استئناف بعد Flood Wait`);
               accountRetries++;
             } else {
-              addLog("warning", `فشل: @${member.username} بحساب ${account.phone} - إعادة بالتالي`);
+              addLog("warning", `فشل: ${memberLabel} بحساب ${account.phone} - إعادة بالتالي`);
               rotateToNextAccount(activeAccounts);
               accountRetries++;
               await sleep(3000);
@@ -589,7 +568,7 @@ export function useAutoAddMembers({
             onUpdateMemberStatus(member.id, "failed", "استنفذت كل الحسابات");
             batchFailed++;
             statsRef.current.totalFailed++;
-            addLog("error", `❌ فشل إضافة @${member.username} - استنفذت كل الحسابات`);
+            addLog("error", `❌ فشل إضافة ${memberLabel} - استنفذت كل الحسابات`);
           }
 
           onUpdateProgress({
