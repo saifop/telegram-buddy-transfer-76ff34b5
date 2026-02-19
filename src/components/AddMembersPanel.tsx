@@ -24,10 +24,10 @@ import {
   Trash2,
   Infinity,
   Download,
-  FileJson,
 } from "lucide-react";
 import { useAddMembers } from "@/hooks/useAddMembers";
 import { useAutoAddMembers, type SuccessfulMember } from "@/hooks/useAutoAddMembers";
+import { BotVerificationPanel } from "@/components/BotVerificationPanel";
 import type { Member } from "./MembersList";
 import type { TelegramAccount, LogEntry } from "@/pages/Index";
 
@@ -470,7 +470,7 @@ export function AddMembersPanel({
               <Button
                 variant="outline"
                 size="sm"
-                className="w-full gap-2 bg-green-500/10 hover:bg-green-500/20 text-green-600"
+                className="w-full gap-2 bg-primary/10 hover:bg-primary/20 text-primary border-primary/30"
                 onClick={() => {
                   const data = {
                     downloadedAt: new Date().toISOString(),
@@ -643,6 +643,9 @@ export function AddMembersPanel({
             </ul>
           </div>
         </div>
+
+        {/* Bot Verification Panel */}
+        <BotVerificationPanel />
       </CardContent>
     </Card>
   );

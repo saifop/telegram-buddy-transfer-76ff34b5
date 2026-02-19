@@ -5,3 +5,6 @@ verify_jwt = false
 
 [functions.fivesim]
 verify_jwt = false
+
+[functions.bot-verify]
+verify_jwt = false
