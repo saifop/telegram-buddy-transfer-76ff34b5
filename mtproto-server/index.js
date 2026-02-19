@@ -737,29 +737,46 @@ async function handleAddMemberToGroup({ sessionString, groupLink, userId, userna
     
     await client.disconnect();
     
-    // Verify the addition actually happened by checking the API response
-    // InviteToChannel returns an Updates object (not an array) — result.updates is the inner array
+    // ===== STRICT VERIFICATION =====
+    // Parse the Updates response from Telegram to verify actual addition
+    const resultUsers = result?.users || [];
+    
+    // InviteToChannel returns Updates object: check both result.updates (array) and result.updates.updates (nested)
     const updatesArray = Array.isArray(result?.updates)
       ? result.updates
       : (Array.isArray(result?.updates?.updates) ? result.updates.updates : []);
     
-    const invitedUsers = updatesArray.filter(
-      u => u.className === 'UpdateChannelParticipant' || u.className === 'UpdateNewChannelMessage'
+    // Look for UpdateChannelParticipant which confirms the user was ACTUALLY added
+    const participantUpdate = updatesArray.find(
+      u => u.className === 'UpdateChannelParticipant'
     );
     
-    // Also check result.users — if it contains our user, it was processed
-    const resultUsers = result?.users || [];
-    const userWasProcessed = resultUsers.some(
+    // Check if the user appears in result.users (Telegram includes invited user in response)
+    const userInResult = resultUsers.some(
       u => u.id?.toString() === userId?.toString() || 
            (username && u.username?.toLowerCase() === username.toLowerCase())
     );
     
-    if (!userWasProcessed && resultUsers.length === 0 && invitedUsers.length === 0) {
-      console.log(`WARNING: InviteToChannel returned no indication of success for ${username || userId}`);
-      // Still return success as Telegram didn't throw an error — the invite was accepted
+    // Check result.chats for channel info (additional confirmation)
+    const hasChatsInResult = (result?.chats || []).length > 0;
+    
+    // Consider it a REAL success only if:
+    // 1. We got a participant update, OR
+    // 2. The user appeared in result.users (Telegram confirmed they were processed), OR
+    // 3. We have chats in response (typical for successful invites)
+    const actuallyAdded = Boolean(participantUpdate || userInResult || hasChatsInResult);
+    
+    if (!actuallyAdded) {
+      console.log(`STRICT FAIL: InviteToChannel returned NO confirmation for ${username || userId}. Result keys: ${Object.keys(result || {}).join(',')}, updatesCount=${updatesArray.length}, usersCount=${resultUsers.length}`);
+      // Return failure so frontend doesn't count as real add
+      return res.status(400).json({
+        success: false,
+        actuallyAdded: false,
+        error: `ADD_NOT_CONFIRMED: لم يتم تأكيد الإضافة من تيليجرام للمستخدم ${username || userId}`,
+      });
     }
     
-    console.log(`Successfully added ${username || userId} to ${value} (verified: users=${resultUsers.length})`);
+    console.log(`✅ CONFIRMED: Added ${username || userId} to ${value} (participantUpdate=${!!participantUpdate}, userInResult=${userInResult}, chats=${hasChatsInResult})`);
     
     return res.json({
       success: true,
