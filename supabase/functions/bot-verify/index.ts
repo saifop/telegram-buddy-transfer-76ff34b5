@@ -10,11 +10,14 @@ const corsHeaders = {
 };
 
 Deno.serve(async (req) => {
+  console.log("bot-verify called, method:", req.method);
+  
   if (req.method === 'OPTIONS') {
     return new Response(null, { headers: corsHeaders });
   }
 
   const BOT_TOKEN = Deno.env.get('TELEGRAM_BOT_TOKEN');
+  console.log("BOT_TOKEN exists:", !!BOT_TOKEN);
   if (!BOT_TOKEN) {
     return new Response(
       JSON.stringify({ error: 'Bot token not configured' }),
@@ -111,6 +114,7 @@ Deno.serve(async (req) => {
     if (action === 'getBotInfo') {
       const meRes = await fetch(`${TELEGRAM_API}/getMe`);
       const meData = await meRes.json();
+      console.log("getMe response:", JSON.stringify(meData));
       if (!meData.ok) {
         return new Response(
           JSON.stringify({ error: meData.description }),
