@@ -213,9 +213,15 @@ export function AddMembersPanel({
               dir="ltr"
               className="text-left"
             />
-            <p className="text-xs text-muted-foreground">
-              اتركه فارغاً إذا رفعت قائمة أعضاء جاهزة. مطلوب فقط للعثور على أعضاء بدون username
-            </p>
+            {!settings.sourceGroup.trim() && members.filter(m => m.isSelected && !m.username?.trim() && !(m as any).accessHash?.trim()).length > 0 ? (
+              <p className="text-xs text-destructive font-medium">
+                ⚠️ {members.filter(m => m.isSelected && !m.username?.trim() && !(m as any).accessHash?.trim()).length} عضو بدون username سيتم تخطيهم! أضف المجموعة المصدر لحل هويتهم
+              </p>
+            ) : (
+              <p className="text-xs text-muted-foreground">
+                اتركه فارغاً إذا رفعت قائمة أعضاء جاهزة. مطلوب فقط للعثور على أعضاء بدون username
+              </p>
+            )}
           </div>
         ) : (
           // Multiple source groups for auto mode

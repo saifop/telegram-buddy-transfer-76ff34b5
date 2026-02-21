@@ -300,11 +300,43 @@ export function useAddMembers({
     pauseRef.current = false;
     onOperationStart();
 
+    // Pre-filter: separate resolvable vs unresolvable members
+    const hasSourceGroup = !!settings.sourceGroup.trim();
+    const resolvableMembers: Member[] = [];
+    const unresolvableMembers: Member[] = [];
+    
+    for (const m of selectedMembers) {
+      const hasUsername = !!m.username?.trim();
+      const hasAccessHash = !!(m as any).accessHash?.trim();
+      
+      if (hasUsername || hasAccessHash || hasSourceGroup) {
+        resolvableMembers.push(m);
+      } else {
+        unresolvableMembers.push(m);
+      }
+    }
+
+    // Mark unresolvable members as skipped
+    if (unresolvableMembers.length > 0) {
+      addLog("warning", `⚠️ ${unresolvableMembers.length} عضو بدون username أو accessHash وبدون مجموعة مصدر - سيتم تخطيهم`);
+      addLog("info", `💡 حدد "المجموعة المصدر" لحل هوية الأعضاء الذين ليس لديهم username`);
+      for (const m of unresolvableMembers) {
+        onUpdateMemberStatus(m.id, "skipped", "لا يوجد username أو accessHash - حدد المجموعة المصدر");
+      }
+    }
+
+    if (resolvableMembers.length === 0) {
+      addLog("error", "لا يوجد أعضاء قابلون للإضافة. حدد المجموعة المصدر أو استخدم أعضاء لديهم username");
+      setIsRunning(false);
+      onOperationEnd();
+      return;
+    }
+
     // Step 1: Join target group with all accounts first
     addLog("info", `جاري انضمام ${activeAccounts.length} حساب للمجموعات...`);
     
     const groupsToJoin: string[] = [];
-    if (settings.sourceGroup.trim()) {
+    if (hasSourceGroup) {
       groupsToJoin.push(settings.sourceGroup.trim());
     }
     groupsToJoin.push(settings.targetGroup.trim());
@@ -342,9 +374,10 @@ export function useAddMembers({
       return;
     }
 
-    // Step 2: Start adding members directly (USER_ALREADY_PARTICIPANT is handled per-member)
-    const filteredMembers = selectedMembers;
-    addLog("info", `بدء إضافة ${filteredMembers.length} عضو بواسطة ${activeAccounts.length} حساب بالتوازي`);
+    // Step 2: Start adding resolvable members only
+    const filteredMembers = resolvableMembers;
+    const totalIncludingSkipped = selectedMembers.length;
+    addLog("info", `بدء إضافة ${filteredMembers.length} عضو (تخطي ${unresolvableMembers.length}) بواسطة ${activeAccounts.length} حساب بالتوازي`);
     onUpdateProgress({ current: 0, total: filteredMembers.length });
 
     // Create a queue of members
