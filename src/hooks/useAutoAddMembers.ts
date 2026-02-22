@@ -261,7 +261,7 @@ export function useAutoAddMembers({
     member: Member,
     account: TelegramAccount,
     sourceGroup: string
-  ): Promise<{ success: boolean; floodWait?: number; skip?: boolean; banned?: boolean; error?: string }> => {
+  ): Promise<{ success: boolean; floodWait?: number; skip?: boolean; banned?: boolean; notAdmin?: boolean; error?: string }> => {
     // Skip if already added (prevent duplicate attempts)
     if (addedUserIdsRef.current.has(member.oderId)) {
       return { success: false, skip: true, error: "تمت إضافته مسبقاً" };
@@ -342,12 +342,16 @@ export function useAutoAddMembers({
 
       const errorMsg = data?.error || "";
 
-      // Check if banned
+      // Check if banned (actual ban)
       if (errorMsg.toLowerCase().includes("banned") || 
           errorMsg.toLowerCase().includes("محظور") ||
-          errorMsg.includes("USER_BANNED") ||
-          errorMsg.includes("CHAT_WRITE_FORBIDDEN")) {
+          errorMsg.includes("USER_BANNED")) {
         return { success: false, banned: true, error: errorMsg };
+      }
+
+      // CHAT_WRITE_FORBIDDEN = not admin, rotate account
+      if (errorMsg.includes("CHAT_WRITE_FORBIDDEN") || errorMsg.includes("ليس لديك صلاحية") || errorMsg.includes("مشرف")) {
+        return { success: false, notAdmin: true, error: errorMsg };
       }
 
       // Flood wait
@@ -547,6 +551,12 @@ export function useAutoAddMembers({
               statsRef.current.totalSkipped++;
               addLog("info", `⏭️ تخطي: ${memberLabel} - ${result.error}`);
               memberDone = true;
+            } else if (result.notAdmin) {
+              onUpdateAccountStatus?.(account.id, "error", "ليس مشرفاً");
+              addLog("error", `⚠️ ${account.phone} ليس مشرفاً - تجربة الحساب التالي`);
+              rotateToNextAccount(activeAccounts);
+              accountRetries++;
+              await sleep(2000);
             } else if (result.banned) {
               onUpdateAccountStatus?.(account.id, "banned", "محظور");
               addLog("error", `⛔ ${account.phone} محظور - إعادة محاولة بالحساب التالي`);
