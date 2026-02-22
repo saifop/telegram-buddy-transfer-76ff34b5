@@ -120,7 +120,7 @@ export function useAddMembers({
   const addMemberWithAccount = async (
     member: Member,
     account: TelegramAccount
-  ): Promise<{ success: boolean; floodWait?: number; isBanned?: boolean; error?: string }> => {
+  ): Promise<{ success: boolean; floodWait?: number; isBanned?: boolean; isNotAdmin?: boolean; error?: string }> => {
     try {
       const { data, error } = await supabase.functions.invoke("telegram-auth", {
         body: {
@@ -168,9 +168,14 @@ export function useAddMembers({
         return { success: false, floodWait: waitSeconds, error: errorMsg };
       }
 
-      // Check for ban
-      if (errorMsg.includes("محظور") || errorMsg.includes("banned") || errorMsg.includes("BAN") || errorMsg.includes("CHAT_WRITE_FORBIDDEN")) {
+      // Check for ban (actual ban, not just missing admin rights)
+      if (errorMsg.includes("محظور") || errorMsg.includes("banned") || errorMsg.includes("USER_BANNED")) {
         return { success: false, isBanned: true, error: errorMsg };
+      }
+
+      // CHAT_WRITE_FORBIDDEN = not admin, should rotate account, not ban it
+      if (errorMsg.includes("CHAT_WRITE_FORBIDDEN") || errorMsg.includes("ليس لديك صلاحية") || errorMsg.includes("مشرف")) {
+        return { success: false, isNotAdmin: true, error: errorMsg };
       }
 
       return { success: false, error: errorMsg };
@@ -251,6 +256,14 @@ export function useAddMembers({
           onUpdateMemberStatus(member.id, "failed", result.error);
           onUpdateAccountStatus?.(worker.account.id, "banned", result.error);
           addLog("error", `⛔ الحساب ${worker.account.phone} محظور`, worker.account.phone);
+          worker.isWorking = false;
+          onMemberProcessed();
+          return;
+        } else if (result.isNotAdmin) {
+          // Account is not admin - stop this worker entirely (all members will fail with this account)
+          onUpdateAccountStatus?.(worker.account.id, "error", "ليس مشرفاً في المجموعة المستهدفة");
+          addLog("error", `⚠️ ${worker.account.phone} ليس مشرفاً - سيتم إيقاف هذا الحساب`, worker.account.phone);
+          // Put member back by not marking as failed - another worker can pick it up
           worker.isWorking = false;
           onMemberProcessed();
           return;
