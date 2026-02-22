@@ -145,14 +145,14 @@ export function useAddMembers({
         return { success: false, error: "العضو موجود مسبقاً في المجموعة" };
       }
 
-      if (data?.success && data?.actuallyAdded) {
+      // STRICT: Only count as success if server explicitly confirmed actuallyAdded
+      if (data?.success && data?.actuallyAdded === true) {
         return { success: true };
       }
 
-      // If server said success but no actuallyAdded flag, treat with caution
+      // If server said success but actuallyAdded is false/missing → silent rejection
       if (data?.success && !data?.actuallyAdded) {
-        // Old server version or ambiguous — still count as success
-        return { success: true };
+        return { success: false, error: "رفض صامت: لم يتم تأكيد الإضافة من تيليجرام" };
       }
 
       const errorMsg = data?.error || "خطأ غير معروف";
