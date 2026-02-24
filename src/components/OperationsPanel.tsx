@@ -182,6 +182,7 @@ export function OperationsPanel({
         username: m.username || "",
         firstName: m.firstName || m.first_name || "",
         lastName: m.lastName || m.last_name || "",
+        accessHash: m.accessHash || "",
         status: "pending" as const,
         isSelected: true,
       }));
@@ -243,8 +244,10 @@ export function OperationsPanel({
             action: "addMemberToGroup",
             sessionString: account.sessionString,
             groupLink: targetGroup,
+            sourceGroup: sourceGroup,
             userId: member.oderId,
             username: member.username,
+            accessHash: (member as any).accessHash || "",
             apiId: account.apiId,
             apiHash: account.apiHash,
           },
