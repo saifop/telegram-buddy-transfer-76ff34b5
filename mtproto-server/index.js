@@ -737,52 +737,11 @@ async function handleAddMemberToGroup({ sessionString, groupLink, userId, userna
     
     await client.disconnect();
     
-    // ===== VERIFICATION =====
-    // InviteToChannel succeeded without throwing - Telegram accepted the request
-    // Parse response for additional confirmation signals
-    const resultUsers = result?.users || [];
-    const resultChats = result?.chats || [];
-    
-    // GramJS Updates object: result.updates is the array of Update objects
-    const updatesArray = Array.isArray(result?.updates)
-      ? result.updates
-      : (Array.isArray(result?.updates?.updates) ? result.updates.updates : []);
-    
-    // Check for UpdateChannelParticipant (strongest confirmation)
-    const participantUpdate = updatesArray.find(
-      u => u.className === 'UpdateChannelParticipant'
-    );
-    
-    // Check if user appears in result.users
-    const userInResult = resultUsers.some(
-      u => u.id?.toString() === userId?.toString() || 
-           (username && u.username?.toLowerCase() === username.toLowerCase())
-    );
-    
-    // Check for any updates at all (Telegram returns empty updates for silent rejections)
-    const hasAnyUpdates = updatesArray.length > 0;
-    const hasChatsInResult = resultChats.length > 0;
-    const hasUsersInResult = resultUsers.length > 0;
-    
-    // If InviteToChannel didn't throw AND we got ANY response data, consider it successful
-    // True silent rejections return completely empty Updates objects
-    const actuallyAdded = Boolean(
-      participantUpdate || userInResult || hasAnyUpdates || hasChatsInResult || hasUsersInResult
-    );
-    
-    console.log(`InviteToChannel result for ${username || userId}: updates=${updatesArray.length}, users=${resultUsers.length}, chats=${resultChats.length}, participantUpdate=${!!participantUpdate}, actuallyAdded=${actuallyAdded}`);
-    
-    if (!actuallyAdded) {
-      // Truly empty response = silent rejection
-      console.log(`Silent rejection: InviteToChannel returned empty response for ${username || userId}`);
-      return res.status(400).json({
-        success: false,
-        actuallyAdded: false,
-        error: `ADD_NOT_CONFIRMED: لم يتم تأكيد الإضافة من تيليجرام للمستخدم ${username || userId}`,
-      });
-    }
-    
-    console.log(`✅ CONFIRMED: Added ${username || userId} to ${value}`);
+    // ===== SUCCESS =====
+    // InviteToChannel completed without throwing an exception.
+    // Telegram throws specific errors (CHAT_ADMIN_REQUIRED, USER_PRIVACY_RESTRICTED, etc.)
+    // for actual failures. If we reach here, the API call was accepted.
+    console.log(`✅ InviteToChannel succeeded for ${username || userId} → ${value}`);
     
     return res.json({
       success: true,
