@@ -318,12 +318,7 @@ export function useAutoAddMembers({
           return { success: false, skip: true, error: "العضو موجود مسبقاً في المجموعة" };
         }
         
-        // STRICT: Only count as real success if actuallyAdded is confirmed
-        if (data?.actuallyAdded !== true) {
-          addedUserIdsRef.current.add(member.oderId);
-          return { success: false, skip: true, error: "رفض صامت: لم يتم تأكيد الإضافة من تيليجرام" };
-        }
-        
+        // Trust server success - InviteToChannel completed without throwing
         // Mark as successfully added
         addedUserIdsRef.current.add(member.oderId);
         
