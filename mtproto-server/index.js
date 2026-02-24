@@ -737,38 +737,44 @@ async function handleAddMemberToGroup({ sessionString, groupLink, userId, userna
     
     await client.disconnect();
     
-    // ===== STRICT VERIFICATION =====
-    // Parse the Updates response from Telegram to verify actual addition
+    // ===== VERIFICATION =====
+    // InviteToChannel succeeded without throwing - Telegram accepted the request
+    // Parse response for additional confirmation signals
     const resultUsers = result?.users || [];
+    const resultChats = result?.chats || [];
     
-    // InviteToChannel returns Updates object: check both result.updates (array) and result.updates.updates (nested)
+    // GramJS Updates object: result.updates is the array of Update objects
     const updatesArray = Array.isArray(result?.updates)
       ? result.updates
       : (Array.isArray(result?.updates?.updates) ? result.updates.updates : []);
     
-    // Look for UpdateChannelParticipant which confirms the user was ACTUALLY added
+    // Check for UpdateChannelParticipant (strongest confirmation)
     const participantUpdate = updatesArray.find(
       u => u.className === 'UpdateChannelParticipant'
     );
     
-    // Check if the user appears in result.users (Telegram includes invited user in response)
+    // Check if user appears in result.users
     const userInResult = resultUsers.some(
       u => u.id?.toString() === userId?.toString() || 
            (username && u.username?.toLowerCase() === username.toLowerCase())
     );
     
-    // Check result.chats for channel info (additional confirmation)
-    const hasChatsInResult = (result?.chats || []).length > 0;
+    // Check for any updates at all (Telegram returns empty updates for silent rejections)
+    const hasAnyUpdates = updatesArray.length > 0;
+    const hasChatsInResult = resultChats.length > 0;
+    const hasUsersInResult = resultUsers.length > 0;
     
-    // Consider it a REAL success only if:
-    // 1. We got a participant update, OR
-    // 2. The user appeared in result.users (Telegram confirmed they were processed), OR
-    // 3. We have chats in response (typical for successful invites)
-    const actuallyAdded = Boolean(participantUpdate || userInResult || hasChatsInResult);
+    // If InviteToChannel didn't throw AND we got ANY response data, consider it successful
+    // True silent rejections return completely empty Updates objects
+    const actuallyAdded = Boolean(
+      participantUpdate || userInResult || hasAnyUpdates || hasChatsInResult || hasUsersInResult
+    );
+    
+    console.log(`InviteToChannel result for ${username || userId}: updates=${updatesArray.length}, users=${resultUsers.length}, chats=${resultChats.length}, participantUpdate=${!!participantUpdate}, actuallyAdded=${actuallyAdded}`);
     
     if (!actuallyAdded) {
-      console.log(`STRICT FAIL: InviteToChannel returned NO confirmation for ${username || userId}. Result keys: ${Object.keys(result || {}).join(',')}, updatesCount=${updatesArray.length}, usersCount=${resultUsers.length}`);
-      // Return failure so frontend doesn't count as real add
+      // Truly empty response = silent rejection
+      console.log(`Silent rejection: InviteToChannel returned empty response for ${username || userId}`);
       return res.status(400).json({
         success: false,
         actuallyAdded: false,
@@ -776,7 +782,7 @@ async function handleAddMemberToGroup({ sessionString, groupLink, userId, userna
       });
     }
     
-    console.log(`✅ CONFIRMED: Added ${username || userId} to ${value} (participantUpdate=${!!participantUpdate}, userInResult=${userInResult}, chats=${hasChatsInResult})`);
+    console.log(`✅ CONFIRMED: Added ${username || userId} to ${value}`);
     
     return res.json({
       success: true,
