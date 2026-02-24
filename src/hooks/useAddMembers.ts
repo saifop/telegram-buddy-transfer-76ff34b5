@@ -162,6 +162,18 @@ export function useAddMembers({
         return { success: false, error: "العضو موجود مسبقاً في المجموعة" };
       }
 
+      // Skippable errors - don't retry, just skip this member
+      if (errorMsg.includes("جهة اتصال متبادلة") || 
+          errorMsg.includes("PEER_ID_INVALID") ||
+          errorMsg.includes("ADD_NOT_CONFIRMED") ||
+          errorMsg.includes("لم يتم تأكيد") ||
+          errorMsg.includes("USER_PRIVACY_RESTRICTED") ||
+          errorMsg.includes("خصوصية") ||
+          errorMsg.includes("USER_CHANNELS_TOO_MUCH") ||
+          errorMsg.includes("500 مجموعة")) {
+        return { success: false, error: errorMsg };
+      }
+
       // Check for flood wait (also check floodWait field from server)
       if (data?.floodWait || errorMsg.toLowerCase().includes("flood") || errorMsg.includes("تم تجاوز الحد") || errorMsg.includes("429")) {
         const waitSeconds = data?.floodWait || extractFloodWaitSeconds(errorMsg);
@@ -242,6 +254,18 @@ export function useAddMembers({
           onUpdateMemberStatus(member.id, "skipped", "موجود مسبقاً في المجموعة");
           addLog("info", `⏭️ ${memberLabel} موجود مسبقاً`, worker.account.phone);
           success = true; // Don't retry
+        } else if (
+          result.error?.includes("جهة اتصال متبادلة") ||
+          result.error?.includes("PEER_ID_INVALID") ||
+          result.error?.includes("ADD_NOT_CONFIRMED") ||
+          result.error?.includes("لم يتم تأكيد") ||
+          result.error?.includes("USER_PRIVACY_RESTRICTED") ||
+          result.error?.includes("خصوصية") ||
+          result.error?.includes("USER_CHANNELS_TOO_MUCH")
+        ) {
+          onUpdateMemberStatus(member.id, "skipped", result.error);
+          addLog("info", `⏭️ تخطي ${memberLabel}: ${result.error}`, worker.account.phone);
+          success = true; // Don't retry - skip to next member
         } else if (result.floodWait) {
           const waitSec = result.floodWait;
           addLog("warning", `⚠️ Flood Wait ${waitSec}s على ${worker.account.phone}`, worker.account.phone);

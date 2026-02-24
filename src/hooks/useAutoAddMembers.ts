@@ -235,6 +235,7 @@ export function useAutoAddMembers({
             firstName: m.firstName || "",
             lastName: m.lastName || "",
             phone: m.phone || "",
+            accessHash: m.accessHash || "",
             isSelected: true,
             status: "pending" as const,
           }));
@@ -276,6 +277,7 @@ export function useAutoAddMembers({
           sourceGroup: sourceGroup,
           userId: member.oderId,
           username: member.username,
+          accessHash: (member as any).accessHash || "",
           apiId: account.apiId,
           apiHash: account.apiHash,
         },
@@ -367,7 +369,11 @@ export function useAutoAddMembers({
         errorMsg.includes("USER_PRIVACY_RESTRICTED") ||
         errorMsg.includes("خصوصية") ||
         errorMsg.includes("موجود مسبقاً") ||
-        errorMsg.includes("USER_ALREADY_PARTICIPANT")
+        errorMsg.includes("USER_ALREADY_PARTICIPANT") ||
+        errorMsg.includes("جهة اتصال متبادلة") ||
+        errorMsg.includes("PEER_ID_INVALID") ||
+        errorMsg.includes("ADD_NOT_CONFIRMED") ||
+        errorMsg.includes("لم يتم تأكيد")
       ) {
         // Mark as processed to avoid re-trying
         addedUserIdsRef.current.add(member.oderId);
