@@ -192,122 +192,7 @@ export function useAddMembers({
     }
   };
 
-  // Worker function for each account - runs in parallel
-  const accountWorkerFn = async (
-    worker: AccountWorker,
-    memberQueue: Member[],
-    getNextMember: () => Member | null,
-    onMemberProcessed: () => void,
-    staggerDelayMs: number
-  ) => {
-    // Initial stagger delay so accounts don't all start at once
-    await sleep(staggerDelayMs);
-
-    while (!abortRef.current) {
-      // Check if paused globally
-      while (pauseRef.current && !abortRef.current) {
-        await sleep(500);
-      }
-      if (abortRef.current) break;
-
-      // Check if account is in flood wait
-      if (worker.pausedUntil) {
-        const now = Date.now();
-        if (now < worker.pausedUntil) {
-          const remainingSec = Math.ceil((worker.pausedUntil - now) / 1000);
-          addLog("info", `⏳ ${worker.account.phone} - انتظار ${remainingSec} ثانية...`);
-          await sleep(Math.min(10000, worker.pausedUntil - now));
-          continue;
-        } else {
-          // Flood wait ended, resume
-          worker.pausedUntil = null;
-          onUpdateAccountStatus?.(worker.account.id, "connected", undefined);
-          addLog("success", `✅ ${worker.account.phone} - انتهى وقت الانتظار، استئناف`);
-        }
-      }
-
-      // Get next member to process
-      const member = getNextMember();
-      if (!member) break;
-
-      const memberLabel = member.username ? `@${member.username}` : (member.firstName || `ID:${member.oderId}`);
-      addLog("info", `جاري إضافة: ${memberLabel}`, worker.account.phone);
-
-      let retries = 0;
-      const maxRetries = settings.maxRetries || 2;
-      let success = false;
-
-      while (retries <= maxRetries && !abortRef.current && !success) {
-        const result = await addMemberWithAccount(member, worker.account);
-
-        if (result.success) {
-          onUpdateMemberStatus(member.id, "added");
-          worker.addedCount++;
-          addLog("success", `✅ تمت إضافة: ${memberLabel}`, worker.account.phone);
-          success = true;
-        } else if (result.error?.includes("موجود مسبقاً")) {
-          onUpdateMemberStatus(member.id, "skipped", "موجود مسبقاً في المجموعة");
-          addLog("info", `⏭️ ${memberLabel} موجود مسبقاً`, worker.account.phone);
-          success = true; // Don't retry
-        } else if (
-          result.error?.includes("جهة اتصال متبادلة") ||
-          result.error?.includes("PEER_ID_INVALID") ||
-          result.error?.includes("ADD_NOT_CONFIRMED") ||
-          result.error?.includes("لم يتم تأكيد") ||
-          result.error?.includes("USER_PRIVACY_RESTRICTED") ||
-          result.error?.includes("خصوصية") ||
-          result.error?.includes("USER_CHANNELS_TOO_MUCH")
-        ) {
-          onUpdateMemberStatus(member.id, "skipped", result.error);
-          addLog("info", `⏭️ تخطي ${memberLabel}: ${result.error}`, worker.account.phone);
-          success = true; // Don't retry - skip to next member
-        } else if (result.floodWait) {
-          const waitSec = result.floodWait;
-          addLog("warning", `⚠️ Flood Wait ${waitSec}s على ${worker.account.phone}`, worker.account.phone);
-          worker.pausedUntil = Date.now() + (waitSec * 1000);
-          onUpdateAccountStatus?.(worker.account.id, "flood", `انتظار ${waitSec} ثانية`);
-          await sleep(waitSec * 1000);
-          worker.pausedUntil = null;
-          onUpdateAccountStatus?.(worker.account.id, "connected", undefined);
-          addLog("info", `✅ ${worker.account.phone} - استئناف بعد Flood Wait`);
-          retries++;
-        } else if (result.isBanned) {
-          onUpdateMemberStatus(member.id, "failed", result.error);
-          onUpdateAccountStatus?.(worker.account.id, "banned", result.error);
-          addLog("error", `⛔ الحساب ${worker.account.phone} محظور`, worker.account.phone);
-          worker.isWorking = false;
-          onMemberProcessed();
-          return;
-        } else if (result.isNotAdmin) {
-          // Account is not admin - stop this worker entirely (all members will fail with this account)
-          onUpdateAccountStatus?.(worker.account.id, "error", "ليس مشرفاً في المجموعة المستهدفة");
-          addLog("error", `⚠️ ${worker.account.phone} ليس مشرفاً - سيتم إيقاف هذا الحساب`, worker.account.phone);
-          // Put member back by not marking as failed - another worker can pick it up
-          worker.isWorking = false;
-          onMemberProcessed();
-          return;
-        } else {
-          retries++;
-          if (retries <= maxRetries) {
-            addLog("warning", `إعادة محاولة (${retries}/${maxRetries}): ${memberLabel}`, worker.account.phone);
-            await sleep(5000);
-          } else {
-            onUpdateMemberStatus(member.id, "failed", result.error);
-            addLog("error", `❌ فشل إضافة ${memberLabel}: ${result.error}`, worker.account.phone);
-          }
-        }
-      }
-
-      onMemberProcessed();
-
-      // Delay before next operation - use longer delays for safety
-      const delay = getRandomDelay();
-      await sleep(delay * 1000);
-    }
-
-    worker.isWorking = false;
-  };
-
+  // Sequential adding: one request at a time, rotating accounts
   const startAdding = useCallback(async () => {
     const selectedMembers = members.filter((m) => m.isSelected && m.status === "pending");
     const activeAccounts = accounts.filter((a) => a.isSelected && a.status === "connected" && a.sessionString);
@@ -351,49 +236,38 @@ export function useAddMembers({
     // Mark unresolvable members as skipped
     if (unresolvableMembers.length > 0) {
       addLog("warning", `⚠️ ${unresolvableMembers.length} عضو بدون username أو accessHash وبدون مجموعة مصدر - سيتم تخطيهم`);
-      addLog("info", `💡 حدد "المجموعة المصدر" لحل هوية الأعضاء الذين ليس لديهم username`);
       for (const m of unresolvableMembers) {
         onUpdateMemberStatus(m.id, "skipped", "لا يوجد username أو accessHash - حدد المجموعة المصدر");
       }
     }
 
     if (resolvableMembers.length === 0) {
-      addLog("error", "لا يوجد أعضاء قابلون للإضافة. حدد المجموعة المصدر أو استخدم أعضاء لديهم username");
+      addLog("error", "لا يوجد أعضاء قابلون للإضافة");
       setIsRunning(false);
       onOperationEnd();
       return;
     }
 
-    // Step 1: Join target group with all accounts first
+    // Step 1: Join groups sequentially (one at a time)
     addLog("info", `جاري انضمام ${activeAccounts.length} حساب للمجموعات...`);
     
     const groupsToJoin: string[] = [];
-    if (hasSourceGroup) {
-      groupsToJoin.push(settings.sourceGroup.trim());
-    }
+    if (hasSourceGroup) groupsToJoin.push(settings.sourceGroup.trim());
     groupsToJoin.push(settings.targetGroup.trim());
     
     for (const account of activeAccounts) {
       if (abortRef.current) break;
-      
       for (const groupLink of groupsToJoin) {
         if (abortRef.current) break;
-        
         const groupName = groupLink.includes("/") ? groupLink.split("/").pop() : groupLink;
         addLog("info", `${account.phone} - جاري الانضمام إلى ${groupName}...`);
-        
         const result = await joinGroupWithAccount(account, groupLink);
-        
         if (result.success) {
-          if (result.alreadyJoined) {
-            addLog("info", `${account.phone} - موجود مسبقاً في ${groupName}`);
-          } else {
-            addLog("success", `${account.phone} - تم الانضمام إلى ${groupName}`);
-          }
+          addLog(result.alreadyJoined ? "info" : "success", 
+            `${account.phone} - ${result.alreadyJoined ? "موجود مسبقاً في" : "تم الانضمام إلى"} ${groupName}`);
         } else {
-          addLog("warning", `${account.phone} - فشل الانضمام إلى ${groupName}: ${result.error}`);
+          addLog("warning", `${account.phone} - فشل الانضمام: ${result.error}`);
         }
-        
         await sleep(2000);
       }
     }
@@ -402,66 +276,171 @@ export function useAddMembers({
       setIsRunning(false);
       setIsPaused(false);
       onOperationEnd();
-      addLog("warning", "تم إلغاء العملية");
       return;
     }
 
-    // Step 2: Start adding resolvable members only
-    const filteredMembers = resolvableMembers;
-    const totalIncludingSkipped = selectedMembers.length;
-    addLog("info", `بدء إضافة ${filteredMembers.length} عضو (تخطي ${unresolvableMembers.length}) بواسطة ${activeAccounts.length} حساب بالتوازي`);
-    onUpdateProgress({ current: 0, total: filteredMembers.length });
+    // Step 2: Sequential adding with account rotation (ONE request at a time)
+    addLog("info", `بدء إضافة ${resolvableMembers.length} عضو بالتناوب على ${activeAccounts.length} حساب (طلب واحد في كل مرة)`);
+    onUpdateProgress({ current: 0, total: resolvableMembers.length });
 
-    // Create a queue of members
-    const memberQueue = [...filteredMembers];
-    let queueIndex = 0;
+    // Track account states
+    const accountFloodUntil = new Map<string, number>(); // accountId -> timestamp
+    const bannedAccounts = new Set<string>();
+    const notAdminAccounts = new Set<string>();
+    let currentAccountIdx = 0;
+    let successCount = 0;
     let processedCount = 0;
 
-    // Thread-safe get next member
-    const getNextMember = (): Member | null => {
-      if (queueIndex >= memberQueue.length) return null;
-      const member = memberQueue[queueIndex];
-      queueIndex++;
-      return member;
+    const getAvailableAccount = (): TelegramAccount | null => {
+      const now = Date.now();
+      const totalAccounts = activeAccounts.length;
+      
+      for (let i = 0; i < totalAccounts; i++) {
+        const idx = (currentAccountIdx + i) % totalAccounts;
+        const acc = activeAccounts[idx];
+        
+        if (bannedAccounts.has(acc.id)) continue;
+        if (notAdminAccounts.has(acc.id)) continue;
+        
+        const floodUntil = accountFloodUntil.get(acc.id);
+        if (floodUntil && now < floodUntil) continue;
+        
+        // Clear expired flood
+        if (floodUntil && now >= floodUntil) {
+          accountFloodUntil.delete(acc.id);
+          onUpdateAccountStatus?.(acc.id, "connected", undefined);
+        }
+        
+        currentAccountIdx = (idx + 1) % totalAccounts;
+        return acc;
+      }
+      
+      // All accounts busy - find shortest flood wait
+      let shortestWait = Infinity;
+      for (const [accId, until] of accountFloodUntil) {
+        if (!bannedAccounts.has(accId) && !notAdminAccounts.has(accId)) {
+          shortestWait = Math.min(shortestWait, until - now);
+        }
+      }
+      
+      if (shortestWait < Infinity && shortestWait > 0) {
+        return null; // Caller should wait
+      }
+      
+      return null;
     };
 
-    // Update progress when member processed
-    const onMemberProcessed = () => {
+    for (let i = 0; i < resolvableMembers.length && !abortRef.current; i++) {
+      // Check pause
+      while (pauseRef.current && !abortRef.current) {
+        await sleep(500);
+      }
+      if (abortRef.current) break;
+
+      const member = resolvableMembers[i];
+      const memberLabel = member.username ? `@${member.username}` : (member.firstName || `ID:${member.oderId}`);
+
+      let retries = 0;
+      const maxRetries = settings.maxRetries || 2;
+      let memberDone = false;
+
+      while (!memberDone && retries <= maxRetries && !abortRef.current) {
+        // Get available account (wait if all in flood)
+        let account = getAvailableAccount();
+        
+        if (!account) {
+          // All accounts in flood/banned - wait for shortest flood to end
+          const now = Date.now();
+          let shortestWait = Infinity;
+          for (const [accId, until] of accountFloodUntil) {
+            if (!bannedAccounts.has(accId) && !notAdminAccounts.has(accId)) {
+              shortestWait = Math.min(shortestWait, until - now);
+            }
+          }
+          
+          if (shortestWait < Infinity && shortestWait > 0) {
+            addLog("info", `⏳ جميع الحسابات في انتظار - ${Math.ceil(shortestWait / 1000)}s...`);
+            await sleep(shortestWait + 1000);
+            account = getAvailableAccount();
+          }
+          
+          if (!account) {
+            // All banned/not admin
+            addLog("error", "لا يوجد حسابات متاحة - استنفذت جميع الحسابات");
+            onUpdateMemberStatus(member.id, "failed", "لا يوجد حسابات متاحة");
+            memberDone = true;
+            break;
+          }
+        }
+
+        addLog("info", `جاري إضافة: ${memberLabel}`, account.phone);
+        const result = await addMemberWithAccount(member, account);
+
+        if (result.success) {
+          onUpdateMemberStatus(member.id, "added");
+          successCount++;
+          addLog("success", `✅ تمت إضافة: ${memberLabel}`, account.phone);
+          memberDone = true;
+        } else if (result.error?.includes("موجود مسبقاً")) {
+          onUpdateMemberStatus(member.id, "skipped", "موجود مسبقاً");
+          addLog("info", `⏭️ ${memberLabel} موجود مسبقاً`, account.phone);
+          memberDone = true;
+        } else if (
+          result.error?.includes("جهة اتصال متبادلة") ||
+          result.error?.includes("PEER_ID_INVALID") ||
+          result.error?.includes("ADD_NOT_CONFIRMED") ||
+          result.error?.includes("لم يتم تأكيد") ||
+          result.error?.includes("USER_PRIVACY_RESTRICTED") ||
+          result.error?.includes("خصوصية") ||
+          result.error?.includes("USER_CHANNELS_TOO_MUCH")
+        ) {
+          onUpdateMemberStatus(member.id, "skipped", result.error);
+          addLog("info", `⏭️ تخطي ${memberLabel}: ${result.error}`, account.phone);
+          memberDone = true;
+        } else if (result.floodWait) {
+          const waitSec = result.floodWait;
+          addLog("warning", `⚠️ Flood Wait ${waitSec}s على ${account.phone}`, account.phone);
+          accountFloodUntil.set(account.id, Date.now() + (waitSec * 1000));
+          onUpdateAccountStatus?.(account.id, "flood", `انتظار ${waitSec}s`);
+          // Don't increment retries - just rotate to next account
+          retries++;
+        } else if (result.isBanned) {
+          bannedAccounts.add(account.id);
+          onUpdateAccountStatus?.(account.id, "banned", result.error);
+          addLog("error", `⛔ ${account.phone} محظور`, account.phone);
+          retries++;
+        } else if (result.isNotAdmin) {
+          notAdminAccounts.add(account.id);
+          onUpdateAccountStatus?.(account.id, "error", "ليس مشرفاً");
+          addLog("error", `⚠️ ${account.phone} ليس مشرفاً`, account.phone);
+          retries++;
+        } else {
+          retries++;
+          if (retries <= maxRetries) {
+            addLog("warning", `إعادة محاولة (${retries}/${maxRetries}): ${memberLabel}`, account.phone);
+            await sleep(5000);
+          } else {
+            onUpdateMemberStatus(member.id, "failed", result.error);
+            addLog("error", `❌ فشل إضافة ${memberLabel}: ${result.error}`, account.phone);
+            memberDone = true;
+          }
+        }
+      }
+
       processedCount++;
-      onUpdateProgress({ current: processedCount, total: selectedMembers.length });
-    };
+      onUpdateProgress({ current: processedCount, total: resolvableMembers.length });
 
-    // Create workers for each account
-    const workers: AccountWorker[] = activeAccounts.map((account) => ({
-      account,
-      pausedUntil: null,
-      isWorking: true,
-      addedCount: 0,
-    }));
-
-    // Start all workers with staggered delays (2-5 seconds between each)
-    const staggerDelay = 3000; // 3 seconds between each account start
-    const workerPromises = workers.map((worker, index) =>
-      accountWorkerFn(
-        worker,
-        memberQueue,
-        getNextMember,
-        onMemberProcessed,
-        index * staggerDelay
-      )
-    );
-
-    // Wait for all workers to finish
-    await Promise.all(workerPromises);
-
-    // Calculate results
-    const successCount = workers.reduce((sum, w) => sum + w.addedCount, 0);
-    const failCount = processedCount - successCount;
+      // Delay before next member
+      if (!abortRef.current && i < resolvableMembers.length - 1) {
+        const delay = getRandomDelay();
+        await sleep(delay * 1000);
+      }
+    }
 
     setIsRunning(false);
     setIsPaused(false);
     onOperationEnd();
-    addLog("success", `انتهت العملية: ${successCount} نجاح، ${failCount} فشل`);
+    addLog("success", `انتهت العملية: ${successCount} نجاح، ${processedCount - successCount} فشل/تخطي`);
     onUpdateProgress({ current: 0, total: 0 });
   }, [members, accounts, settings, addLog, onUpdateProgress, onUpdateMemberStatus, onUpdateAccountStatus, onOperationStart, onOperationEnd]);
 
