@@ -5,8 +5,9 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { supabase } from "@/integrations/supabase/client";
-import { Bot, Users, RefreshCw, TrendingUp, AlertTriangle, CheckCircle2 } from "lucide-react";
+import { Users, RefreshCw, TrendingUp, CheckCircle2 } from "lucide-react";
 import { toast } from "sonner";
+import type { TelegramAccount } from "@/pages/Index";
 
 interface VerificationSnapshot {
   timestamp: string;
@@ -14,82 +15,76 @@ interface VerificationSnapshot {
   label: string;
 }
 
-export function BotVerificationPanel() {
+interface AccountVerificationPanelProps {
+  accounts: TelegramAccount[];
+}
+
+export function BotVerificationPanel({ accounts }: AccountVerificationPanelProps) {
   const [groupLink, setGroupLink] = useState("");
   const [isLoading, setIsLoading] = useState(false);
-  const [botInfo, setBotInfo] = useState<{ username: string; first_name: string } | null>(null);
   const [currentCount, setCurrentCount] = useState<number | null>(null);
   const [chatTitle, setChatTitle] = useState<string | null>(null);
   const [snapshots, setSnapshots] = useState<VerificationSnapshot[]>([]);
-  const [botError, setBotError] = useState<string | null>(null);
-  const [isBotReady, setIsBotReady] = useState<boolean | null>(null);
+  const [verifyError, setVerifyError] = useState<string | null>(null);
 
-  // Check bot status on load
-  const checkBot = async () => {
-    setIsLoading(true);
-    setBotError(null);
-    try {
-      const { data, error } = await supabase.functions.invoke("bot-verify", {
-        body: { action: "getBotInfo" },
-      });
-      if (error || !data?.success) {
-        setBotError(data?.error || error?.message || "فشل الاتصال بالبوت");
-        setIsBotReady(false);
-      } else {
-        setBotInfo(data.bot);
-        setIsBotReady(true);
-        toast.success(`البوت @${data.bot.username} جاهز ✅`);
-      }
-    } catch (err) {
-      setBotError("خطأ في الاتصال بخادم التحقق");
-      setIsBotReady(false);
-    } finally {
-      setIsLoading(false);
-    }
+  const getActiveAccount = (): TelegramAccount | null => {
+    return accounts.find(a => a.status === "connected" && a.sessionString) || null;
   };
 
-  // Get current member count
+  // Get member count using an active session account via MTProto
   const getMemberCount = async (label?: string) => {
     if (!groupLink.trim()) {
       toast.error("أدخل رابط المجموعة أولاً");
       return;
     }
+
+    const account = getActiveAccount();
+    if (!account) {
+      toast.error("لا يوجد حساب متصل للتحقق");
+      return;
+    }
+
     setIsLoading(true);
-    setBotError(null);
+    setVerifyError(null);
     try {
-      const { data, error } = await supabase.functions.invoke("bot-verify", {
-        body: { action: "getMemberCount", groupLink: groupLink.trim() },
+      // Use telegram-auth edge function with getGroupMembers to get count
+      const { data, error } = await supabase.functions.invoke("telegram-auth", {
+        body: {
+          action: "getGroupMembers",
+          sessionString: account.sessionString,
+          groupLink: groupLink.trim(),
+          apiId: account.apiId,
+          apiHash: account.apiHash,
+          limit: 1,
+          offset: 0,
+        },
       });
 
-      if (error || !data?.success) {
+      if (error || data?.error) {
         const errMsg = data?.error || error?.message || "خطأ غير معروف";
-        setBotError(errMsg);
-        if (data?.hint) {
-          toast.error(errMsg, { description: data.hint });
-        } else {
-          toast.error(errMsg);
-        }
+        setVerifyError(errMsg);
+        toast.error(errMsg);
       } else {
-        setCurrentCount(data.memberCount);
-        setChatTitle(data.chatTitle);
+        const memberCount = data?.totalCount || data?.members?.length || 0;
+        setCurrentCount(memberCount);
+        setChatTitle(data?.chatTitle || groupLink.trim());
 
         const snap: VerificationSnapshot = {
           timestamp: new Date().toLocaleTimeString("ar-SA"),
-          count: data.memberCount,
+          count: memberCount,
           label: label || `فحص ${snapshots.length + 1}`,
         };
         setSnapshots((prev) => [...prev, snap]);
-        toast.success(`عدد الأعضاء الحالي: ${data.memberCount.toLocaleString()}`);
+        toast.success(`عدد الأعضاء الحالي: ${memberCount.toLocaleString()}`);
       }
     } catch (err) {
-      setBotError("خطأ في الاتصال");
-      toast.error("خطأ في الاتصال بخادم التحقق");
+      setVerifyError("خطأ في الاتصال");
+      toast.error("خطأ في الاتصال بالخادم");
     } finally {
       setIsLoading(false);
     }
   };
 
-  // Calculate actual additions between snapshots
   const getActualAdditions = () => {
     if (snapshots.length < 2) return null;
     const first = snapshots[0];
@@ -98,60 +93,31 @@ export function BotVerificationPanel() {
   };
 
   const actualAdded = getActualAdditions();
+  const hasActiveAccount = !!getActiveAccount();
 
   return (
     <Card className="border-2 border-dashed border-primary/30">
       <CardHeader className="pb-3">
         <CardTitle className="text-base flex items-center gap-2">
-          <Bot className="w-4 h-4 text-primary" />
-          تحقق البوت من الإضافة الحقيقية
+          <Users className="w-4 h-4 text-primary" />
+          تحقق عدد الأعضاء الحقيقي
         </CardTitle>
       </CardHeader>
 
       <CardContent className="space-y-4">
-        {/* Bot Status */}
+        {/* Account Status */}
         <div className="flex items-center gap-2">
-          {isBotReady === null ? (
-            <Badge variant="outline" className="gap-1">
-              <span className="w-2 h-2 rounded-full bg-muted-foreground" />
-              البوت غير محدد
-            </Badge>
-          ) : isBotReady ? (
+          {hasActiveAccount ? (
             <Badge className="gap-1 bg-primary/20 text-primary border-primary/30">
               <CheckCircle2 className="w-3 h-3" />
-              @{botInfo?.username} جاهز
+              حساب متصل للتحقق
             </Badge>
           ) : (
             <Badge variant="destructive" className="gap-1">
-              <AlertTriangle className="w-3 h-3" />
-              البوت غير متصل
+              لا يوجد حساب متصل
             </Badge>
           )}
-          <Button
-            size="sm"
-            variant="ghost"
-            onClick={checkBot}
-            disabled={isLoading}
-            className="gap-1 text-xs"
-          >
-            <RefreshCw className={`w-3 h-3 ${isLoading ? "animate-spin" : ""}`} />
-            فحص البوت
-          </Button>
         </div>
-
-        {/* Instructions if bot not ready */}
-        {isBotReady === false && (
-          <div className="p-3 rounded-lg bg-accent/50 border border-border text-xs space-y-1">
-            <p className="font-medium text-foreground flex items-center gap-1">
-              <AlertTriangle className="w-3 h-3" />
-              خطوات تفعيل البوت:
-            </p>
-            <ol className="text-muted-foreground space-y-0.5 pr-3 list-decimal">
-              <li>أضف @CO0k12bot للمجموعة المستهدفة كعضو (ليس مشرفاً)</li>
-              <li>اضغط "فحص البوت" مرة أخرى</li>
-            </ol>
-          </div>
-        )}
 
         {/* Group Link Input */}
         <div className="space-y-1.5">
@@ -174,7 +140,7 @@ export function BotVerificationPanel() {
             size="sm"
             variant="outline"
             onClick={() => getMemberCount("قبل الإضافة 📸")}
-            disabled={isLoading || !groupLink.trim()}
+            disabled={isLoading || !groupLink.trim() || !hasActiveAccount}
             className="gap-1 text-xs"
           >
             📸 سجّل قبل الإضافة
@@ -182,7 +148,7 @@ export function BotVerificationPanel() {
           <Button
             size="sm"
             onClick={() => getMemberCount("بعد الإضافة 📊")}
-            disabled={isLoading || !groupLink.trim()}
+            disabled={isLoading || !groupLink.trim() || !hasActiveAccount}
             className="gap-1 text-xs"
           >
             {isLoading ? (
@@ -195,9 +161,9 @@ export function BotVerificationPanel() {
         </div>
 
         {/* Error display */}
-        {botError && (
+        {verifyError && (
           <div className="p-3 rounded-lg bg-destructive/10 border border-destructive/20 text-xs text-destructive">
-            {botError}
+            {verifyError}
           </div>
         )}
 
@@ -226,7 +192,7 @@ export function BotVerificationPanel() {
               {actualAdded > 0 ? "+" : ""}{actualAdded.toLocaleString()}
             </div>
             <div className="text-xs text-muted-foreground mt-0.5">
-              إضافة حقيقية مؤكدة من البوت
+              إضافة حقيقية مؤكدة
             </div>
           </div>
         )}

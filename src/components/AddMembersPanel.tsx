@@ -651,7 +651,7 @@ export function AddMembersPanel({
         </div>
 
         {/* Bot Verification Panel */}
-        <BotVerificationPanel />
+        <BotVerificationPanel accounts={accounts} />
       </CardContent>
     </Card>
   );
