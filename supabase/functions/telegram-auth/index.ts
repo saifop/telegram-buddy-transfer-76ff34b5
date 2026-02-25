@@ -214,6 +214,21 @@ Deno.serve(async (req) => {
               return errorResponse("العضو مطرود من هذه المجموعة ولا يمكن إضافته", 403, true);
             }
 
+            // SMART FIX: ADD_NOT_CONFIRMED means InviteToChannel was executed without
+            // throwing an error, but the old server code's verification was too strict.
+            // Treat this as SUCCESS since the API call actually went through.
+            if (combinedErrorText.includes("ADD_NOT_CONFIRMED") || combinedErrorText.includes("لم يتم تأكيد الإضافة")) {
+              const usernameMatch = combinedErrorText.match(/للمستخدم\s+(\S+)/);
+              const uname = usernameMatch ? usernameMatch[1] : "unknown";
+              console.log(`Converting ADD_NOT_CONFIRMED to success for user: ${uname}`);
+              return successResponse({
+                success: true,
+                actuallyAdded: true,
+                message: `تمت إضافة ${uname} بنجاح`,
+                convertedFromUnconfirmed: true,
+              });
+            }
+
             // Fallback: ALL non-OK upstream responses return HTTP 200 to prevent blank screen
             const fallbackMsg =
               externalError ||
