@@ -102,12 +102,50 @@ export function ExtractMembersDialog({
 
   const [extractionStatus, setExtractionStatus] = useState("");
 
+  const isPrivateLink = (link: string) => {
+    return link.includes("/+") || link.includes("joinchat/");
+  };
+
   const extractMembers = async (account: TelegramAccount) => {
     setStep("extracting");
     setIsLoading(true);
     setProgress(0);
 
     try {
+      // Step 0: If private link, join the group first
+      if (isPrivateLink(sourceGroup)) {
+        setExtractionStatus("جاري الانضمام للمجموعة الخاصة...");
+        addLog("info", `رابط خاص، جاري الانضمام أولاً: ${sourceGroup}`);
+        
+        const { data: joinData, error: joinError } = await supabase.functions.invoke("telegram-auth", {
+          body: {
+            action: "joinGroup",
+            sessionString: account.sessionString,
+            groupLink: sourceGroup,
+            apiId: account.apiId,
+            apiHash: account.apiHash,
+          },
+        });
+
+        if (joinError) {
+          // Check if already joined (not a real error)
+          const errText = joinError.message || "";
+          if (!errText.includes("already") && !errText.includes("موجود")) {
+            throw new Error(`فشل الانضمام: ${joinError.message}`);
+          }
+        }
+        if (joinData?.error) {
+          const errText = joinData.error;
+          if (!errText.includes("already") && !errText.includes("موجود") && !errText.includes("USER_ALREADY_PARTICIPANT")) {
+            throw new Error(`فشل الانضمام: ${errText}`);
+          }
+        }
+        
+        addLog("success", "تم الانضمام للمجموعة الخاصة بنجاح");
+        // Small delay after joining
+        await new Promise(r => setTimeout(r, 2000));
+      }
+
       addLog("info", `جاري استخراج جميع الأعضاء من: ${sourceGroup}`);
 
       const allMembers: any[] = [];
@@ -308,14 +346,17 @@ export function ExtractMembersDialog({
           {step === "input" && (
             <div className="space-y-4">
               <div className="space-y-2">
-                <Label>رابط أو معرف المجموعة المصدر</Label>
+                 <Label>رابط أو معرف المجموعة المصدر</Label>
                 <Input
-                  placeholder="https://t.me/groupname أو @groupname"
+                  placeholder="https://t.me/groupname أو https://t.me/+invite"
                   value={sourceGroup}
                   onChange={(e) => setSourceGroup(e.target.value)}
                   dir="ltr"
                   className="text-left"
                 />
+                {isPrivateLink(sourceGroup) && (
+                  <p className="text-xs text-amber-500 mt-1">🔒 رابط خاص — سيتم الانضمام تلقائياً قبل الاستخراج</p>
+                )}
               </div>
 
               {error && (
