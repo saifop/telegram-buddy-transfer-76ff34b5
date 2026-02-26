@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { LinkSuggestionsInput, saveLink } from "@/components/LinkSuggestionsInput";
 import { Label } from "@/components/ui/label";
 import { Slider } from "@/components/ui/slider";
 import { Switch } from "@/components/ui/switch";
@@ -206,12 +207,10 @@ export function AddMembersPanel({
               <Users className="w-4 h-4" />
               المجموعة المصدر (اختياري)
             </Label>
-            <Input
+            <LinkSuggestionsInput
               placeholder="https://t.me/sourcegroup أو @sourcegroup"
               value={settings.sourceGroup}
-              onChange={(e) => setSettings({ ...settings, sourceGroup: e.target.value })}
-              dir="ltr"
-              className="text-left"
+              onChange={(v) => { setSettings({ ...settings, sourceGroup: v }); saveLink(v); }}
             />
             {!settings.sourceGroup.trim() && members.filter(m => m.isSelected && !m.username?.trim() && !(m as any).accessHash?.trim()).length > 0 ? (
               <p className="text-xs text-destructive font-medium">
@@ -244,12 +243,11 @@ export function AddMembersPanel({
             <div className="space-y-2 max-h-40 overflow-y-auto">
               {sourceGroups.map((group, index) => (
                 <div key={index} className="flex gap-2">
-                  <Input
+                  <LinkSuggestionsInput
                     placeholder={`كروب ${index + 1}: https://t.me/group أو @group`}
                     value={group}
-                    onChange={(e) => updateSourceGroup(index, e.target.value)}
-                    dir="ltr"
-                    className="text-left flex-1"
+                    onChange={(v) => { updateSourceGroup(index, v); saveLink(v); }}
+                    className="flex-1"
                   />
                   {sourceGroups.length > 1 && (
                     <Button
@@ -276,12 +274,10 @@ export function AddMembersPanel({
             <Target className="w-4 h-4" />
             المجموعة المستهدفة
           </Label>
-          <Input
+          <LinkSuggestionsInput
             placeholder="https://t.me/groupname أو @groupname"
             value={settings.targetGroup}
-            onChange={(e) => setSettings({ ...settings, targetGroup: e.target.value })}
-            dir="ltr"
-            className="text-left"
+            onChange={(v) => { setSettings({ ...settings, targetGroup: v }); saveLink(v); }}
           />
         </div>
 
