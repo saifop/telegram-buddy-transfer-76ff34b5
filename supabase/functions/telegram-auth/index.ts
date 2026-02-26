@@ -248,10 +248,10 @@ Deno.serve(async (req) => {
         return successResponse(data as object);
       } catch (err) {
         if (err instanceof DOMException && err.name === "AbortError") {
-          return errorResponse("Authentication service timeout. Try again.", 504);
+          return errorResponse("انتهت مهلة الاتصال بالخادم. حاول مرة أخرى.", 504, true);
         }
         console.error("External service error:", err);
-        return errorResponse("Failed to connect to authentication service", 502);
+        return errorResponse("فشل الاتصال بخادم المصادقة. تحقق من اتصال Railway.", 502, true);
       }
     }
 
