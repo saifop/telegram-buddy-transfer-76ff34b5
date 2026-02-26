@@ -375,13 +375,22 @@ async function handleJoinGroup({ sessionString, groupLink, apiId, apiHash }, res
     
     console.log(`Joining group: ${value} (type: ${type})`);
     
+    let resolvedChatId = null;
+    let resolvedTitle = null;
+    
     if (type === 'hash') {
       // Private group - use import invite
-      await client.invoke(
+      const result = await client.invoke(
         new Api.messages.ImportChatInvite({
           hash: value,
         })
       );
+      // Extract chat ID from the result
+      if (result?.chats?.length > 0) {
+        const chat = result.chats[0];
+        resolvedChatId = chat.id?.value !== undefined ? `-100${chat.id.value}` : (chat.id ? `-100${chat.id}` : null);
+        resolvedTitle = chat.title;
+      }
     } else {
       // Public group - join by username
       await client.invoke(
@@ -396,6 +405,8 @@ async function handleJoinGroup({ sessionString, groupLink, apiId, apiHash }, res
     return res.json({
       success: true,
       message: `Joined group ${value} successfully`,
+      chatId: resolvedChatId,
+      chatTitle: resolvedTitle,
     });
 
   } catch (error) {
@@ -409,7 +420,22 @@ async function handleJoinGroup({ sessionString, groupLink, apiId, apiHash }, res
       return res.status(400).json({ error: 'رابط الدعوة منتهي الصلاحية' });
     }
     if (errorMessage.includes('USER_ALREADY_PARTICIPANT')) {
-      return res.json({ success: true, message: 'Already a member' });
+      // Try to resolve the chat to get the ID even if already joined
+      let resolvedChatId = null;
+      try {
+        const client2 = await getClientFromSession(sessionString, apiId || 123456, apiHash || 'demo');
+        // For invite hash, use CheckChatInvite to get info
+        const { type: t2, value: v2 } = parseGroupLink(groupLink);
+        if (t2 === 'hash') {
+          const checkResult = await client2.invoke(new Api.messages.CheckChatInvite({ hash: v2 }));
+          if (checkResult?.chat) {
+            const c = checkResult.chat;
+            resolvedChatId = c.id?.value !== undefined ? `-100${c.id.value}` : (c.id ? `-100${c.id}` : null);
+          }
+        }
+        await client2.disconnect();
+      } catch (e) { /* ignore */ }
+      return res.json({ success: true, message: 'Already a member', chatId: resolvedChatId });
     }
     if (errorMessage.includes('USERS_TOO_MUCH')) {
       return res.status(400).json({ error: 'المجموعة ممتلئة' });
@@ -483,8 +509,8 @@ async function handleLeaveGroup({ sessionString, groupLink, apiId, apiHash }, re
 /**
  * Get members from a group
  */
-async function handleGetGroupMembers({ sessionString, groupLink, apiId, apiHash, searchQuery: singleQuery, knownIds }, res) {
-  if (!sessionString || !groupLink) {
+async function handleGetGroupMembers({ sessionString, groupLink, chatId, apiId, apiHash, searchQuery: singleQuery, knownIds }, res) {
+  if (!sessionString || (!groupLink && !chatId)) {
     return res.status(400).json({ error: 'Missing required parameters' });
   }
 
@@ -502,12 +528,22 @@ async function handleGetGroupMembers({ sessionString, groupLink, apiId, apiHash,
   try {
     client = await getClientFromSession(sessionString, apiId || 123456, apiHash || 'demo');
 
-    const { value } = parseGroupLink(groupLink);
-    if (!value) {
-      return res.status(400).json({ error: 'Invalid group link' });
+    let entity;
+    if (chatId) {
+      // Use resolved chat ID directly (for private groups)
+      console.log(`Resolving entity by chatId: ${chatId}`);
+      entity = await client.getEntity(BigInt(chatId.toString().replace('-100', '')));
+      if (!entity) {
+        // Try with full ID
+        entity = await client.getEntity(chatId);
+      }
+    } else {
+      const { value } = parseGroupLink(groupLink);
+      if (!value) {
+        return res.status(400).json({ error: 'Invalid group link' });
+      }
+      entity = await client.getEntity(value);
     }
-
-    const entity = await client.getEntity(value);
 
     // If singleQuery is provided, only process that one query letter
     // Otherwise return the list of queries for the client to iterate
