@@ -248,38 +248,7 @@ export function useAddMembers({
       return;
     }
 
-    // Step 1: Join groups sequentially (one at a time)
-    addLog("info", `جاري انضمام ${activeAccounts.length} حساب للمجموعات...`);
-    
-    const groupsToJoin: string[] = [];
-    if (hasSourceGroup) groupsToJoin.push(settings.sourceGroup.trim());
-    groupsToJoin.push(settings.targetGroup.trim());
-    
-    for (const account of activeAccounts) {
-      if (abortRef.current) break;
-      for (const groupLink of groupsToJoin) {
-        if (abortRef.current) break;
-        const groupName = groupLink.includes("/") ? groupLink.split("/").pop() : groupLink;
-        addLog("info", `${account.phone} - جاري الانضمام إلى ${groupName}...`);
-        const result = await joinGroupWithAccount(account, groupLink);
-        if (result.success) {
-          addLog(result.alreadyJoined ? "info" : "success", 
-            `${account.phone} - ${result.alreadyJoined ? "موجود مسبقاً في" : "تم الانضمام إلى"} ${groupName}`);
-        } else {
-          addLog("warning", `${account.phone} - فشل الانضمام: ${result.error}`);
-        }
-        await sleep(2000);
-      }
-    }
-    
-    if (abortRef.current) {
-      setIsRunning(false);
-      setIsPaused(false);
-      onOperationEnd();
-      return;
-    }
-
-    // Step 2: Sequential adding with account rotation (ONE request at a time)
+    // Direct adding without join step - sequential with account rotation (ONE request at a time)
     addLog("info", `بدء إضافة ${resolvableMembers.length} عضو بالتناوب على ${activeAccounts.length} حساب (طلب واحد في كل مرة)`);
     onUpdateProgress({ current: 0, total: resolvableMembers.length });
 
@@ -392,7 +361,10 @@ export function useAddMembers({
           result.error?.includes("لم يتم تأكيد") ||
           result.error?.includes("USER_PRIVACY_RESTRICTED") ||
           result.error?.includes("خصوصية") ||
-          result.error?.includes("USER_CHANNELS_TOO_MUCH")
+          result.error?.includes("USER_CHANNELS_TOO_MUCH") ||
+          result.error?.includes("لا يمكن التعرف") ||
+          result.error?.includes("INPUT_USER_DEACTIVATED") ||
+          result.error?.includes("USER_ID_INVALID")
         ) {
           onUpdateMemberStatus(member.id, "skipped", result.error);
           addLog("info", `⏭️ تخطي ${memberLabel}: ${result.error}`, account.phone);

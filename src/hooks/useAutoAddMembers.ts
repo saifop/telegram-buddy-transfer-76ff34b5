@@ -368,7 +368,10 @@ export function useAutoAddMembers({
         errorMsg.includes("جهة اتصال متبادلة") ||
         errorMsg.includes("PEER_ID_INVALID") ||
         errorMsg.includes("ADD_NOT_CONFIRMED") ||
-        errorMsg.includes("لم يتم تأكيد")
+        errorMsg.includes("لم يتم تأكيد") ||
+        errorMsg.includes("لا يمكن التعرف") ||
+        errorMsg.includes("INPUT_USER_DEACTIVATED") ||
+        errorMsg.includes("USER_ID_INVALID")
       ) {
         // Mark as processed to avoid re-trying
         addedUserIdsRef.current.add(member.oderId);
@@ -444,15 +447,7 @@ export function useAutoAddMembers({
         while (hasMoreMembers && !abortRef.current) {
           const extractAccount = activeAccounts[extractAccountIndex % activeAccounts.length];
           
-          // Join source group with this account only (first time or after failure)
-          if (extractAccountIndex === 0 || extractResult_lastFailed) {
-            addLog("info", `انضمام ${extractAccount.phone} للكروب المصدر...`);
-            const joinResult = await joinGroupWithAccount(extractAccount, currentSourceGroup);
-            if (!joinResult.success) {
-              addLog("warning", `${extractAccount.phone} - فشل الانضمام: ${joinResult.error}`);
-            }
-            await sleep(1500);
-          }
+          // Skip join step - go straight to extraction
           
           const extractResult = await extractMembers(extractAccount, currentSourceGroup, offset);
           extractResult_lastFailed = false;

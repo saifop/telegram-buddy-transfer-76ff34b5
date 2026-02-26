@@ -14,20 +14,22 @@ import { ExtractMembersDialog } from "@/components/ExtractMembersDialog";
 import { ActiveMembersExtractor } from "@/components/ActiveMembersExtractor";
 import { ExtractedMembersFile } from "@/components/ExtractedMembersFile";
 import { FiveSimPanel } from "@/components/FiveSimPanel";
+import { Button } from "@/components/ui/button";
+import { Moon, Sun } from "lucide-react";
 
 export interface TelegramAccount {
   id: string;
   phone: string;
   sessionFile: string;
-  sessionString?: string; // The actual session content for API calls
+  sessionString?: string;
   apiId?: number;
   apiHash?: string;
   status: "connected" | "disconnected" | "loading" | "error" | "banned" | "flood";
   isSelected: boolean;
   lastActivity?: string;
-  statusMessage?: string; // Reason for ban/error/flood
-  addedCount?: number; // Number of members added by this account
-  failedCount?: number; // Number of failed additions
+  statusMessage?: string;
+  addedCount?: number;
+  failedCount?: number;
 }
 
 export interface LogEntry {
@@ -38,16 +40,51 @@ export interface LogEntry {
   accountPhone?: string;
 }
 
+// localStorage helpers
+const loadState = <T,>(key: string, fallback: T): T => {
+  try {
+    const saved = localStorage.getItem(key);
+    return saved ? JSON.parse(saved) : fallback;
+  } catch {
+    return fallback;
+  }
+};
+
+const saveState = (key: string, value: any) => {
+  try {
+    localStorage.setItem(key, JSON.stringify(value));
+  } catch { /* ignore quota errors */ }
+};
+
 const Index = () => {
   const [isAuthenticated, setIsAuthenticated] = useState(() => {
     return localStorage.getItem("app_authenticated") === "true";
   });
-  const [accounts, setAccounts] = useState<TelegramAccount[]>([]);
-  const [members, setMembers] = useState<Member[]>([]);
+  const [accounts, setAccounts] = useState<TelegramAccount[]>(() => loadState("tg_accounts", []));
+  const [members, setMembers] = useState<Member[]>(() => loadState("tg_members", []));
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [operationStatus, setOperationStatus] = useState<"idle" | "running" | "paused">("idle");
   const [progress, setProgress] = useState({ current: 0, total: 0 });
   const [activeTab, setActiveTab] = useState("accounts");
+  const [isDark, setIsDark] = useState(() => {
+    return localStorage.getItem("tg_dark_mode") === "true";
+  });
+
+  // Apply dark mode
+  useEffect(() => {
+    document.documentElement.classList.toggle("dark", isDark);
+    localStorage.setItem("tg_dark_mode", String(isDark));
+  }, [isDark]);
+
+  // Persist accounts
+  useEffect(() => {
+    saveState("tg_accounts", accounts);
+  }, [accounts]);
+
+  // Persist members
+  useEffect(() => {
+    saveState("tg_members", members);
+  }, [members]);
 
   if (!isAuthenticated) {
     return <PasswordGate onSuccess={() => setIsAuthenticated(true)} />;
@@ -244,12 +281,19 @@ const Index = () => {
 
   return (
     <div className="min-h-screen flex w-full bg-background" dir="rtl">
-
         <main className="flex-1 flex flex-col overflow-hidden">
           {/* Header */}
           <header className="h-14 border-b bg-card flex items-center justify-between px-6">
             <h1 className="text-xl font-bold text-foreground">مدير حسابات تيليجرام</h1>
             <div className="flex items-center gap-4">
+              <Button
+                variant="ghost"
+                size="icon"
+                onClick={() => setIsDark(!isDark)}
+                className="h-9 w-9"
+              >
+                {isDark ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
+              </Button>
               <FiveSimPanel />
               <span className="text-sm text-muted-foreground">
                 الحسابات: {accounts.filter((a) => a.isSelected).length}/{accounts.length}
@@ -280,7 +324,6 @@ const Index = () => {
               {/* Accounts Tab */}
               <TabsContent value="accounts" className="flex-1 mt-0 overflow-hidden">
                 <div className="h-full grid grid-cols-1 lg:grid-cols-3 gap-4">
-                  {/* Left Panel - Sessions & Accounts */}
                   <div className="lg:col-span-1 flex flex-col gap-4 overflow-hidden">
                     <SessionManager 
                       onLoadSessions={handleLoadSessions} 
@@ -294,8 +337,6 @@ const Index = () => {
                       onResetAccountStatus={handleResetAccountStatus}
                     />
                   </div>
-
-                  {/* Center Panel - Operations */}
                   <div className="lg:col-span-1 overflow-hidden">
                     <OperationsPanel
                       accounts={accounts}
@@ -307,8 +348,6 @@ const Index = () => {
                       onMembersExtracted={handleImportMembers}
                     />
                   </div>
-
-                  {/* Right Panel - Logs */}
                   <div className="lg:col-span-1 overflow-hidden">
                     <LogsPanel logs={logs} onClear={() => setLogs([])} />
                   </div>
@@ -318,9 +357,7 @@ const Index = () => {
               {/* Members Tab */}
               <TabsContent value="members" className="flex-1 mt-0 overflow-hidden">
                 <div className="h-full grid grid-cols-1 lg:grid-cols-3 gap-4">
-                  {/* Left Panel - Members List */}
                   <div className="lg:col-span-1 overflow-hidden flex flex-col gap-3">
-                    {/* Extraction Buttons */}
                     <div className="flex gap-2 flex-wrap">
                       <ExtractMembersDialog
                         accounts={accounts}
@@ -333,14 +370,11 @@ const Index = () => {
                         addLog={addLog}
                       />
                     </div>
-                    
-                    {/* Files Management */}
                     <ExtractedMembersFile
                       members={members}
                       onImportMembers={handleImportMembers}
                       addLog={addLog}
                     />
-                    
                     <MembersList
                       members={members}
                       onToggleMember={handleToggleMember}
@@ -351,8 +385,6 @@ const Index = () => {
                       onExportMembers={handleExportMembers}
                     />
                   </div>
-
-                  {/* Center Panel - Add Members Settings */}
                   <div className="lg:col-span-1 overflow-hidden">
                     <AddMembersPanel
                       members={members}
@@ -368,8 +400,6 @@ const Index = () => {
                       onAddMembers={handleImportMembers}
                     />
                   </div>
-
-                  {/* Right Panel - Logs */}
                   <div className="lg:col-span-1 overflow-hidden">
                     <LogsPanel logs={logs} onClear={() => setLogs([])} />
                   </div>
