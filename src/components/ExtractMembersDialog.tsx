@@ -112,7 +112,9 @@ export function ExtractMembersDialog({
     setProgress(0);
 
     try {
-      // Step 0: If private link, join the group first
+      // Step 0: If private link, join the group first and get chatId
+      let resolvedChatId: string | null = null;
+      
       if (isPrivateLink(sourceGroup)) {
         setExtractionStatus("جاري الانضمام للمجموعة الخاصة...");
         addLog("info", `رابط خاص، جاري الانضمام أولاً: ${sourceGroup}`);
@@ -128,7 +130,6 @@ export function ExtractMembersDialog({
         });
 
         if (joinError) {
-          // Check if already joined (not a real error)
           const errText = joinError.message || "";
           if (!errText.includes("already") && !errText.includes("موجود")) {
             throw new Error(`فشل الانضمام: ${joinError.message}`);
@@ -141,8 +142,14 @@ export function ExtractMembersDialog({
           }
         }
         
-        addLog("success", "تم الانضمام للمجموعة الخاصة بنجاح");
-        // Small delay after joining
+        // Capture the resolved chatId from join response
+        if (joinData?.chatId) {
+          resolvedChatId = joinData.chatId.toString();
+          addLog("success", `تم الانضمام بنجاح (chatId: ${resolvedChatId})`);
+        } else {
+          addLog("success", "تم الانضمام للمجموعة الخاصة بنجاح");
+        }
+        
         await new Promise(r => setTimeout(r, 2000));
       }
 
@@ -151,16 +158,23 @@ export function ExtractMembersDialog({
       const allMembers: any[] = [];
       const seenIds = new Set<string>();
 
-      // Step 1: Initial request - gets first batch + list of remaining queries
+      // Step 1: Initial request
       setExtractionStatus("جاري بدء الاستخراج...");
+      const extractBody: any = {
+        action: "getGroupMembers",
+        sessionString: account.sessionString,
+        apiId: account.apiId,
+        apiHash: account.apiHash,
+      };
+      // Use chatId for private groups, groupLink for public
+      if (resolvedChatId) {
+        extractBody.chatId = resolvedChatId;
+      } else {
+        extractBody.groupLink = sourceGroup;
+      }
+      
       const { data: initData, error: initError } = await supabase.functions.invoke("telegram-auth", {
-        body: {
-          action: "getGroupMembers",
-          sessionString: account.sessionString,
-          groupLink: sourceGroup,
-          apiId: account.apiId,
-          apiHash: account.apiHash,
-        },
+        body: extractBody,
       });
 
       if (initError) throw initError;
@@ -188,16 +202,21 @@ export function ExtractMembersDialog({
         const queryNum = i + 2;
 
         try {
-          const { data, error: funcError } = await supabase.functions.invoke("telegram-auth", {
-            body: {
+          const batchBody: any = {
               action: "getGroupMembers",
               sessionString: account.sessionString,
-              groupLink: sourceGroup,
               apiId: account.apiId,
               apiHash: account.apiHash,
               searchQuery: q,
               knownIds: Array.from(seenIds),
-            },
+            };
+            if (resolvedChatId) {
+              batchBody.chatId = resolvedChatId;
+            } else {
+              batchBody.groupLink = sourceGroup;
+            }
+            const { data, error: funcError } = await supabase.functions.invoke("telegram-auth", {
+            body: batchBody,
           });
 
           if (funcError) {
