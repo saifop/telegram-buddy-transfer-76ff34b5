@@ -538,11 +538,56 @@ async function handleGetGroupMembers({ sessionString, groupLink, chatId, apiId, 
         entity = await client.getEntity(chatId);
       }
     } else {
-      const { value } = parseGroupLink(groupLink);
+      const { type, value } = parseGroupLink(groupLink);
       if (!value) {
         return res.status(400).json({ error: 'Invalid group link' });
       }
-      entity = await client.getEntity(value);
+      
+      if (type === 'hash') {
+        // Private group invite hash - use CheckChatInvite to resolve the chat
+        console.log(`Resolving private group from invite hash: ${value}`);
+        try {
+          const checkResult = await client.invoke(new Api.messages.CheckChatInvite({ hash: value }));
+          if (checkResult?.chat) {
+            entity = checkResult.chat;
+            console.log(`Resolved private group: ${entity.title} (ID: ${entity.id})`);
+          } else if (checkResult?.className === 'ChatInviteAlready') {
+            entity = checkResult.chat;
+            console.log(`Already in private group: ${entity.title} (ID: ${entity.id})`);
+          } else {
+            // Fallback: search recent dialogs for a match
+            console.log('CheckChatInvite did not return chat, searching dialogs...');
+            const dialogs = await client.getDialogs({ limit: 50 });
+            // Try to find the most recently joined group
+            for (const d of dialogs) {
+              if (d.isChannel || d.isGroup) {
+                entity = d.entity;
+                console.log(`Using most recent group from dialogs: ${entity.title}`);
+                break;
+              }
+            }
+            if (!entity) {
+              return res.status(400).json({ error: 'تعذر العثور على المجموعة بعد الانضمام' });
+            }
+          }
+        } catch (checkErr) {
+          console.error('CheckChatInvite error:', checkErr.message);
+          // Fallback: search dialogs
+          const dialogs = await client.getDialogs({ limit: 50 });
+          for (const d of dialogs) {
+            if (d.isChannel || d.isGroup) {
+              entity = d.entity;
+              console.log(`Fallback: using group from dialogs: ${entity.title}`);
+              break;
+            }
+          }
+          if (!entity) {
+            return res.status(400).json({ error: 'تعذر العثور على المجموعة' });
+          }
+        }
+      } else {
+        entity = await client.getEntity(value);
+      }
     }
 
     // If singleQuery is provided, only process that one query letter
