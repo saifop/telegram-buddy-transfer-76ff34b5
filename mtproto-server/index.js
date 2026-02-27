@@ -532,10 +532,42 @@ async function handleGetGroupMembers({ sessionString, groupLink, chatId, apiId, 
     if (chatId) {
       // Use resolved chat ID directly (for private groups)
       console.log(`Resolving entity by chatId: ${chatId}`);
-      entity = await client.getEntity(BigInt(chatId.toString().replace('-100', '')));
+      const rawId = chatId.toString().replace('-100', '');
+      const attempts = [
+        () => client.getEntity(BigInt(rawId)),
+        () => client.getEntity(parseInt(rawId)),
+        () => client.getEntity(BigInt(`-100${rawId}`)),
+        () => client.getEntity(parseInt(`-100${rawId}`)),
+      ];
+      for (const attempt of attempts) {
+        try {
+          entity = await attempt();
+          if (entity) {
+            console.log(`Resolved entity: ${entity.title || entity.id}`);
+            break;
+          }
+        } catch (e) {
+          console.log(`Entity resolve attempt failed: ${e.message}`);
+        }
+      }
       if (!entity) {
-        // Try with full ID
-        entity = await client.getEntity(chatId);
+        // Last resort: search dialogs for a matching group
+        console.log('All getEntity attempts failed, searching dialogs...');
+        const dialogs = await client.getDialogs({ limit: 100 });
+        const targetId = rawId.toString();
+        for (const d of dialogs) {
+          if (d.entity && (d.isChannel || d.isGroup)) {
+            const dId = d.entity.id?.value !== undefined ? d.entity.id.value.toString() : d.entity.id?.toString();
+            if (dId === targetId) {
+              entity = d.entity;
+              console.log(`Found entity in dialogs: ${entity.title}`);
+              break;
+            }
+          }
+        }
+        if (!entity) {
+          return res.status(400).json({ error: 'تعذر العثور على المجموعة بمعرفها' });
+        }
       }
     } else {
       const { type, value } = parseGroupLink(groupLink);
@@ -544,46 +576,54 @@ async function handleGetGroupMembers({ sessionString, groupLink, chatId, apiId, 
       }
       
       if (type === 'hash') {
-        // Private group invite hash - use CheckChatInvite to resolve the chat
-        console.log(`Resolving private group from invite hash: ${value}`);
+        // Private group - first join, then resolve from dialogs
+        console.log(`Private group hash detected: ${value}`);
+        
+        // Try joining first (will throw USER_ALREADY_PARTICIPANT if already in)
         try {
-          const checkResult = await client.invoke(new Api.messages.CheckChatInvite({ hash: value }));
-          if (checkResult?.chat) {
-            entity = checkResult.chat;
-            console.log(`Resolved private group: ${entity.title} (ID: ${entity.id})`);
-          } else if (checkResult?.className === 'ChatInviteAlready') {
-            entity = checkResult.chat;
-            console.log(`Already in private group: ${entity.title} (ID: ${entity.id})`);
-          } else {
-            // Fallback: search recent dialogs for a match
-            console.log('CheckChatInvite did not return chat, searching dialogs...');
-            const dialogs = await client.getDialogs({ limit: 50 });
-            // Try to find the most recently joined group
-            for (const d of dialogs) {
-              if (d.isChannel || d.isGroup) {
-                entity = d.entity;
-                console.log(`Using most recent group from dialogs: ${entity.title}`);
-                break;
-              }
-            }
-            if (!entity) {
-              return res.status(400).json({ error: 'تعذر العثور على المجموعة بعد الانضمام' });
-            }
+          const joinResult = await client.invoke(new Api.messages.ImportChatInvite({ hash: value }));
+          if (joinResult?.chats?.length > 0) {
+            entity = joinResult.chats[0];
+            console.log(`Joined and resolved: ${entity.title} (ID: ${entity.id})`);
           }
-        } catch (checkErr) {
-          console.error('CheckChatInvite error:', checkErr.message);
-          // Fallback: search dialogs
-          const dialogs = await client.getDialogs({ limit: 50 });
+        } catch (joinErr) {
+          const errMsg = joinErr.message || '';
+          if (!errMsg.includes('USER_ALREADY_PARTICIPANT')) {
+            console.error('Join error during extraction:', errMsg);
+          } else {
+            console.log('Already a participant, resolving via CheckChatInvite...');
+          }
+        }
+        
+        // If join didn't give us entity, try CheckChatInvite
+        if (!entity) {
+          try {
+            const checkResult = await client.invoke(new Api.messages.CheckChatInvite({ hash: value }));
+            // ChatInviteAlready has the chat object
+            entity = checkResult?.chat || null;
+            if (entity) {
+              console.log(`CheckChatInvite resolved: ${entity.title} (ID: ${entity.id})`);
+            }
+          } catch (e) {
+            console.log(`CheckChatInvite failed: ${e.message}`);
+          }
+        }
+        
+        // Final fallback: search all dialogs
+        if (!entity) {
+          console.log('Searching dialogs for the private group...');
+          const dialogs = await client.getDialogs({ limit: 100 });
           for (const d of dialogs) {
             if (d.isChannel || d.isGroup) {
               entity = d.entity;
-              console.log(`Fallback: using group from dialogs: ${entity.title}`);
+              console.log(`Using first group from dialogs: ${entity.title}`);
               break;
             }
           }
-          if (!entity) {
-            return res.status(400).json({ error: 'تعذر العثور على المجموعة' });
-          }
+        }
+        
+        if (!entity) {
+          return res.status(400).json({ error: 'تعذر العثور على المجموعة الخاصة' });
         }
       } else {
         entity = await client.getEntity(value);
