@@ -505,18 +505,19 @@ export function ExtractMembersDialog({
                 </div>
               </ScrollArea>
 
-              <div className="flex items-center justify-between pt-2">
-                <span className="text-sm text-muted-foreground">
-                  محدد: {selectedCount} من {extractedMembers.length}
-                </span>
+              <div className="sticky bottom-0 bg-background border-t pt-3 pb-1 flex flex-col items-center gap-2">
                 <Button
                   onClick={handleAddToList}
                   disabled={selectedCount === 0}
-                  className="gap-2"
+                  className="gap-2 w-full max-w-xs"
+                  size="lg"
                 >
                   <UserPlus className="w-4 h-4" />
-                  إضافة للقائمة
+                  إضافة للقائمة ({selectedCount})
                 </Button>
+                <span className="text-xs text-muted-foreground">
+                  محدد: {selectedCount} من {extractedMembers.length}
+                </span>
               </div>
             </div>
           )}
