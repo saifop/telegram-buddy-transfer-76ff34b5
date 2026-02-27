@@ -165,12 +165,11 @@ export function ExtractMembersDialog({
         sessionString: account.sessionString,
         apiId: account.apiId,
         apiHash: account.apiHash,
+        groupLink: sourceGroup,
       };
-      // Use chatId for private groups, groupLink for public
+      // Also pass chatId if we have it (for faster resolution)
       if (resolvedChatId) {
         extractBody.chatId = resolvedChatId;
-      } else {
-        extractBody.groupLink = sourceGroup;
       }
       
       const { data: initData, error: initError } = await supabase.functions.invoke("telegram-auth", {
@@ -207,13 +206,12 @@ export function ExtractMembersDialog({
               sessionString: account.sessionString,
               apiId: account.apiId,
               apiHash: account.apiHash,
+              groupLink: sourceGroup,
               searchQuery: q,
               knownIds: Array.from(seenIds),
             };
             if (resolvedChatId) {
               batchBody.chatId = resolvedChatId;
-            } else {
-              batchBody.groupLink = sourceGroup;
             }
             const { data, error: funcError } = await supabase.functions.invoke("telegram-auth", {
             body: batchBody,
