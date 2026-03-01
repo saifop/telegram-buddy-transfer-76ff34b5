@@ -126,6 +126,17 @@ Deno.serve(async (req) => {
     if (mtprotoServiceUrl) {
       console.log(`Using external MTProto service: ${mtprotoServiceUrl}`);
       try {
+        // Normalize private invite links: convert +hash format to joinchat/hash
+        // for compatibility with older Railway server versions
+        const normalizedParams = { ...params };
+        if (typeof normalizedParams.groupLink === "string") {
+          const plusMatch = normalizedParams.groupLink.match(/t\.me\/\+([A-Za-z0-9_-]+)/);
+          if (plusMatch?.[1]) {
+            normalizedParams.groupLink = `https://t.me/joinchat/${plusMatch[1]}`;
+            console.log(`Normalized private link to joinchat format: ${normalizedParams.groupLink}`);
+          }
+        }
+
         const controller = new AbortController();
         // Give extraction/join actions more time (120s), others 30s
         const longActions = ["getGroupMembers", "joinGroup", "addMemberToGroup"];
@@ -135,7 +146,7 @@ Deno.serve(async (req) => {
         const response = await fetch(mtprotoServiceUrl, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ action, ...params }),
+          body: JSON.stringify({ action, ...normalizedParams }),
           signal: controller.signal,
         }).finally(() => clearTimeout(timeoutId));
 
@@ -165,15 +176,20 @@ Deno.serve(async (req) => {
           ) {
             const rawGroupLink = params.groupLink;
             const inviteHash = extractInviteHash(rawGroupLink);
-            const fallbackBodies: Array<Record<string, unknown>> = [];
 
-            // First try to resolve chatId by explicitly joining private group.
-            fallbackBodies.push({ action: "joinPrivateGroup", ...params });
-            fallbackBodies.push({ action: "joinGroup", ...params });
-
+            // Use chatId from params if already provided by client
             let resolvedChatId: string | null = null;
+            if (params.chatId) {
+              resolvedChatId = String(params.chatId);
+              console.log(`Using client-provided chatId: ${resolvedChatId}`);
+            }
 
-            for (const joinBody of fallbackBodies) {
+            if (!resolvedChatId) {
+              const fallbackBodies: Array<Record<string, unknown>> = [];
+              fallbackBodies.push({ action: "joinPrivateGroup", ...params });
+              fallbackBodies.push({ action: "joinGroup", ...params });
+
+              for (const joinBody of fallbackBodies) {
               try {
                 const joinResponse = await fetch(mtprotoServiceUrl, {
                   method: "POST",
@@ -196,17 +212,21 @@ Deno.serve(async (req) => {
               } catch (e) {
                 console.warn("Private-group chatId fallback attempt failed:", e);
               }
+              }
             }
 
             // Retry extraction with resolved chatId (preferred), then with joinchat URL variant.
             const retryPayloads: Array<Record<string, unknown>> = [];
 
             if (resolvedChatId) {
+              // Send chatId WITH a dummy groupLink (old Railway requires groupLink to exist)
               retryPayloads.push({
                 action,
                 ...params,
+                groupLink: `dummy_for_chatid`,
                 chatId: resolvedChatId,
               });
+              console.log(`Retry payload with chatId: ${resolvedChatId} and dummy groupLink`);
             }
 
             if (inviteHash) {
@@ -219,6 +239,7 @@ Deno.serve(async (req) => {
 
             for (const retryBody of retryPayloads) {
               try {
+                console.log(`Retry attempt with body keys: ${Object.keys(retryBody).join(', ')}`);
                 const retryResponse = await fetch(mtprotoServiceUrl, {
                   method: "POST",
                   headers: { "Content-Type": "application/json" },
@@ -226,11 +247,14 @@ Deno.serve(async (req) => {
                 });
 
                 const retryText = await retryResponse.text();
+                console.log(`Retry response status: ${retryResponse.status}, body length: ${retryText.length}`);
                 const retryData = retryText ? JSON.parse(retryText) : null;
 
                 if (retryResponse.ok) {
                   console.log("Private-group extraction fallback succeeded");
                   return successResponse(retryData as object);
+                } else {
+                  console.warn("Retry failed with status:", retryResponse.status, retryText.slice(0, 200));
                 }
               } catch (e) {
                 console.warn("Private-group extraction retry failed:", e);
