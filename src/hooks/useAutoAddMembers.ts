@@ -202,23 +202,66 @@ export function useAutoAddMembers({
     }
   };
 
+  const isPrivateLink = (link: string) => {
+    return link.includes("/+") || link.includes("joinchat/");
+  };
+
+  // Resolve chatId for private groups by calling joinGroup twice if needed
+  const resolvePrivateGroupChatId = async (
+    account: TelegramAccount,
+    groupLink: string
+  ): Promise<string | null> => {
+    // First join
+    const { data: joinData } = await supabase.functions.invoke("telegram-auth", {
+      body: {
+        action: "joinGroup",
+        sessionString: account.sessionString,
+        groupLink,
+        apiId: account.apiId,
+        apiHash: account.apiHash,
+      },
+    });
+
+    if (joinData?.chatId) return joinData.chatId.toString();
+
+    // Second call triggers USER_ALREADY_PARTICIPANT → CheckChatInvite
+    await sleep(2000);
+    const { data: retryData } = await supabase.functions.invoke("telegram-auth", {
+      body: {
+        action: "joinGroup",
+        sessionString: account.sessionString,
+        groupLink,
+        apiId: account.apiId,
+        apiHash: account.apiHash,
+      },
+    });
+
+    return retryData?.chatId ? retryData.chatId.toString() : null;
+  };
+
   // Extract members from source group
   const extractMembers = async (
     account: TelegramAccount,
     sourceGroup: string,
-    offset: number = 0
+    offset: number = 0,
+    chatId?: string | null
   ): Promise<{ members: Member[]; hasMore: boolean; error?: string }> => {
     try {
+      const body: any = {
+        action: "getGroupMembers",
+        sessionString: account.sessionString,
+        groupLink: sourceGroup,
+        apiId: account.apiId,
+        apiHash: account.apiHash,
+        limit: settings.membersPerBatch,
+        offset: offset,
+      };
+      if (chatId) {
+        body.chatId = chatId;
+      }
+
       const { data, error } = await supabase.functions.invoke("telegram-auth", {
-        body: {
-          action: "getGroupMembers",
-          sessionString: account.sessionString,
-          groupLink: sourceGroup,
-          apiId: account.apiId,
-          apiHash: account.apiHash,
-          limit: settings.membersPerBatch,
-          offset: offset,
-        },
+        body,
       });
 
       if (error) {
@@ -444,18 +487,32 @@ export function useAutoAddMembers({
         const groupSeenIds = new Set<string>();
         let extractResult_lastFailed = false;
 
+        // Resolve chatId for private groups once before extraction loop
+        let resolvedChatId: string | null = null;
+        if (isPrivateLink(currentSourceGroup)) {
+          addLog("info", `🔒 كروب خاص، جاري حل هوية المجموعة...`);
+          const firstAccount = activeAccounts[0];
+          resolvedChatId = await resolvePrivateGroupChatId(firstAccount, currentSourceGroup);
+          if (resolvedChatId) {
+            addLog("success", `تم الحصول على chatId: ${resolvedChatId}`);
+          } else {
+            addLog("warning", "تعذر الحصول على chatId - سيتم محاولة الاستخراج بالرابط");
+          }
+          await sleep(2000);
+        }
+
         while (hasMoreMembers && !abortRef.current) {
           const extractAccount = activeAccounts[extractAccountIndex % activeAccounts.length];
           
-          // Skip join step - go straight to extraction
-          
-          // Try joining group first to ensure we're a member
-          const joinResult = await joinGroupWithAccount(extractAccount, currentSourceGroup);
-          if (!joinResult.success) {
-            addLog("warning", `فشل الانضمام للكروب بحساب ${extractAccount.phone}: ${joinResult.error}`);
+          // Join group (only for public groups - private already joined during chatId resolution)
+          if (!isPrivateLink(currentSourceGroup)) {
+            const joinResult = await joinGroupWithAccount(extractAccount, currentSourceGroup);
+            if (!joinResult.success) {
+              addLog("warning", `فشل الانضمام للكروب بحساب ${extractAccount.phone}: ${joinResult.error}`);
+            }
           }
 
-          const extractResult = await extractMembers(extractAccount, currentSourceGroup, offset);
+          const extractResult = await extractMembers(extractAccount, currentSourceGroup, offset, resolvedChatId);
           extractResult_lastFailed = false;
 
           if (extractResult.error) {
