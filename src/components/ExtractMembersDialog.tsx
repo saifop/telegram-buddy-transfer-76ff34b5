@@ -147,7 +147,27 @@ export function ExtractMembersDialog({
           resolvedChatId = joinData.chatId.toString();
           addLog("success", `تم الانضمام بنجاح (chatId: ${resolvedChatId})`);
         } else {
-          addLog("success", "تم الانضمام للمجموعة الخاصة بنجاح");
+          // Server didn't return chatId - call joinGroup again to trigger USER_ALREADY_PARTICIPANT
+          // which resolves chatId via CheckChatInvite
+          addLog("info", "لم يتم إرجاع chatId، جاري محاولة الحصول عليه...");
+          await new Promise(r => setTimeout(r, 2000));
+          
+          const { data: retryJoin } = await supabase.functions.invoke("telegram-auth", {
+            body: {
+              action: "joinGroup",
+              sessionString: account.sessionString,
+              groupLink: sourceGroup,
+              apiId: account.apiId,
+              apiHash: account.apiHash,
+            },
+          });
+          
+          if (retryJoin?.chatId) {
+            resolvedChatId = retryJoin.chatId.toString();
+            addLog("success", `تم الحصول على chatId: ${resolvedChatId}`);
+          } else {
+            addLog("warning", "تعذر الحصول على chatId - سيتم محاولة الاستخراج بالرابط مباشرة");
+          }
         }
         
         await new Promise(r => setTimeout(r, 2000));
