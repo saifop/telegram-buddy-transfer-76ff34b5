@@ -60,6 +60,7 @@ export function ExtractMembersDialog({
   const [error, setError] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
   const [isLoading, setIsLoading] = useState(false);
+  const [manualChatId, setManualChatId] = useState("");
 
   const connectedAccounts = accounts.filter((a) => a.status === "connected");
 
@@ -72,6 +73,7 @@ export function ExtractMembersDialog({
     setError("");
     setSearchQuery("");
     setIsLoading(false);
+    setManualChatId("");
   };
 
   const handleOpenChange = (newOpen: boolean) => {
@@ -112,10 +114,10 @@ export function ExtractMembersDialog({
     setProgress(0);
 
     try {
-      // Step 0: If private link, join the group first and get chatId
-      let resolvedChatId: string | null = null;
+      // Step 0: Resolve chatId for private links
+      let resolvedChatId: string | null = manualChatId.trim() || null;
       
-      if (isPrivateLink(sourceGroup)) {
+      if (isPrivateLink(sourceGroup) && !resolvedChatId) {
         setExtractionStatus("جاري الانضمام للمجموعة الخاصة...");
         addLog("info", `رابط خاص، جاري الانضمام أولاً: ${sourceGroup}`);
         
@@ -137,7 +139,7 @@ export function ExtractMembersDialog({
         }
         if (joinData?.error) {
           const errText = joinData.error;
-          if (!errText.includes("already") && !errText.includes("موجود") && !errText.includes("USER_ALREADY_PARTICIPANT")) {
+          if (!errText.includes("already") && !errText.includes("موجود") && !errText.includes("USER_ALREADY_PARTICIPANT") && !errText.includes("FLOOD")) {
             throw new Error(`فشل الانضمام: ${errText}`);
           }
         }
@@ -145,29 +147,9 @@ export function ExtractMembersDialog({
         // Capture the resolved chatId from join response
         if (joinData?.chatId) {
           resolvedChatId = joinData.chatId.toString();
-          addLog("success", `تم الانضمام بنجاح (chatId: ${resolvedChatId})`);
+          addLog("success", `تم الحصول على chatId: ${resolvedChatId}`);
         } else {
-          // Server didn't return chatId - call joinGroup again to trigger USER_ALREADY_PARTICIPANT
-          // which resolves chatId via CheckChatInvite
-          addLog("info", "لم يتم إرجاع chatId، جاري محاولة الحصول عليه...");
-          await new Promise(r => setTimeout(r, 2000));
-          
-          const { data: retryJoin } = await supabase.functions.invoke("telegram-auth", {
-            body: {
-              action: "joinGroup",
-              sessionString: account.sessionString,
-              groupLink: sourceGroup,
-              apiId: account.apiId,
-              apiHash: account.apiHash,
-            },
-          });
-          
-          if (retryJoin?.chatId) {
-            resolvedChatId = retryJoin.chatId.toString();
-            addLog("success", `تم الحصول على chatId: ${resolvedChatId}`);
-          } else {
-            addLog("warning", "تعذر الحصول على chatId - سيتم محاولة الاستخراج بالرابط مباشرة");
-          }
+          addLog("warning", "لم يتم إرجاع chatId — أدخل Chat ID يدوياً في حقل الإدخال إن لم ينجح الاستخراج");
         }
         
         await new Promise(r => setTimeout(r, 2000));
@@ -392,7 +374,19 @@ export function ExtractMembersDialog({
                   className="text-left"
                 />
                 {isPrivateLink(sourceGroup) && (
-                  <p className="text-xs text-amber-500 mt-1">🔒 رابط خاص — سيتم الانضمام تلقائياً قبل الاستخراج</p>
+                  <>
+                    <p className="text-xs text-amber-500 mt-1">🔒 رابط خاص — سيتم الانضمام تلقائياً قبل الاستخراج</p>
+                    <div className="mt-2 space-y-1">
+                      <Label className="text-xs">Chat ID (اختياري - أدخله يدوياً إن فشل الاستخراج)</Label>
+                      <Input
+                        placeholder="مثال: -1001234567890"
+                        value={manualChatId}
+                        onChange={(e) => setManualChatId(e.target.value)}
+                        dir="ltr"
+                        className="text-left text-xs"
+                      />
+                    </div>
+                  </>
                 )}
               </div>
 
