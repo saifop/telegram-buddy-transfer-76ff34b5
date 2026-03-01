@@ -449,15 +449,21 @@ export function useAutoAddMembers({
           
           // Skip join step - go straight to extraction
           
+          // Try joining group first to ensure we're a member
+          const joinResult = await joinGroupWithAccount(extractAccount, currentSourceGroup);
+          if (!joinResult.success) {
+            addLog("warning", `فشل الانضمام للكروب بحساب ${extractAccount.phone}: ${joinResult.error}`);
+          }
+
           const extractResult = await extractMembers(extractAccount, currentSourceGroup, offset);
           extractResult_lastFailed = false;
 
           if (extractResult.error) {
-            addLog("warning", `فشل الاستخراج: ${extractResult.error}`);
+            addLog("warning", `فشل الاستخراج بحساب ${extractAccount.phone}: ${extractResult.error}`);
             extractAccountIndex++;
             extractResult_lastFailed = true;
             if (extractAccountIndex >= activeAccounts.length) {
-              addLog("error", "فشل الاستخراج من جميع الحسابات");
+              addLog("error", "فشل الاستخراج من جميع الحسابات - تأكد أن الحسابات منضمة للكروب");
               break;
             }
             await sleep(5000);
@@ -539,6 +545,9 @@ export function useAutoAddMembers({
               batchAdded++;
               statsRef.current.totalAdded++;
               addLog("success", `✅ تمت إضافة: ${memberLabel}`, account.phone);
+              // Wait 5s for Telegram to confirm the addition before rotating
+              addLog("info", `⏳ انتظار 5 ثوانٍ للتأكيد...`, account.phone);
+              await sleep(5000);
               rotateToNextAccount(activeAccounts);
               memberDone = true;
             } else if (result.skip) {

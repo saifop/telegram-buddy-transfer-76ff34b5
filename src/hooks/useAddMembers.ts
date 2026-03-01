@@ -349,6 +349,9 @@ export function useAddMembers({
           onUpdateMemberStatus(member.id, "added");
           successCount++;
           addLog("success", `✅ تمت إضافة: ${memberLabel}`, account.phone);
+          // Wait 5s for Telegram to confirm the addition before rotating
+          addLog("info", `⏳ انتظار 5 ثوانٍ للتأكيد...`, account.phone);
+          await sleep(5000);
           memberDone = true;
         } else if (result.error?.includes("موجود مسبقاً")) {
           onUpdateMemberStatus(member.id, "skipped", "موجود مسبقاً");
