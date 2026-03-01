@@ -32,6 +32,27 @@ const normalizeServiceUrl = (rawUrl: unknown): string | null => {
 };
 
 // Input validation helpers
+const isPrivateInviteLink = (link: unknown): boolean => {
+  if (typeof link !== "string") return false;
+  return link.includes("/+") || link.includes("joinchat/") || /^\+[A-Za-z0-9_-]+$/.test(link.trim());
+};
+
+const extractInviteHash = (link: string): string | null => {
+  const trimmed = link.trim();
+  if (!trimmed) return null;
+
+  const plusMatch = trimmed.match(/\/\+([A-Za-z0-9_-]+)/);
+  if (plusMatch?.[1]) return plusMatch[1];
+
+  const joinchatMatch = trimmed.match(/joinchat\/([A-Za-z0-9_-]+)/i);
+  if (joinchatMatch?.[1]) return joinchatMatch[1];
+
+  const bareHash = trimmed.match(/^\+?([A-Za-z0-9_-]+)$/);
+  if (bareHash?.[1]) return bareHash[1];
+
+  return null;
+};
+
 const validatePhoneNumber = (phone: string): boolean => {
   return /^\+\d{10,15}$/.test(phone);
 };
@@ -135,6 +156,88 @@ Deno.serve(async (req) => {
         if (!response.ok) {
           console.error("External service non-OK status:", response.status, data);
 
+          // Extraction fallback for legacy MTProto servers:
+          // some old builds incorrectly parse private invite links as usernames.
+          if (
+            action === "getGroupMembers" &&
+            typeof params.groupLink === "string" &&
+            isPrivateInviteLink(params.groupLink)
+          ) {
+            const rawGroupLink = params.groupLink;
+            const inviteHash = extractInviteHash(rawGroupLink);
+            const fallbackBodies: Array<Record<string, unknown>> = [];
+
+            // First try to resolve chatId by explicitly joining private group.
+            fallbackBodies.push({ action: "joinPrivateGroup", ...params });
+            fallbackBodies.push({ action: "joinGroup", ...params });
+
+            let resolvedChatId: string | null = null;
+
+            for (const joinBody of fallbackBodies) {
+              try {
+                const joinResponse = await fetch(mtprotoServiceUrl, {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify(joinBody),
+                });
+
+                const joinText = await joinResponse.text();
+                const joinData = joinText ? JSON.parse(joinText) : null;
+                const chatId = (joinData as { chatId?: unknown })?.chatId;
+
+                if (typeof chatId === "string" && chatId.trim()) {
+                  resolvedChatId = chatId;
+                  break;
+                }
+                if (typeof chatId === "number") {
+                  resolvedChatId = chatId.toString();
+                  break;
+                }
+              } catch (e) {
+                console.warn("Private-group chatId fallback attempt failed:", e);
+              }
+            }
+
+            // Retry extraction with resolved chatId (preferred), then with joinchat URL variant.
+            const retryPayloads: Array<Record<string, unknown>> = [];
+
+            if (resolvedChatId) {
+              retryPayloads.push({
+                action,
+                ...params,
+                chatId: resolvedChatId,
+              });
+            }
+
+            if (inviteHash) {
+              retryPayloads.push({
+                action,
+                ...params,
+                groupLink: `https://t.me/joinchat/${inviteHash}`,
+              });
+            }
+
+            for (const retryBody of retryPayloads) {
+              try {
+                const retryResponse = await fetch(mtprotoServiceUrl, {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify(retryBody),
+                });
+
+                const retryText = await retryResponse.text();
+                const retryData = retryText ? JSON.parse(retryText) : null;
+
+                if (retryResponse.ok) {
+                  console.log("Private-group extraction fallback succeeded");
+                  return successResponse(retryData as object);
+                }
+              } catch (e) {
+                console.warn("Private-group extraction retry failed:", e);
+              }
+            }
+          }
+
           // Extract user-friendly error message from the external service
           const rawExternalError = (data as { error?: unknown; message?: unknown })?.error;
           const rawExternalMessage = (data as { message?: unknown })?.message;
@@ -227,6 +330,21 @@ Deno.serve(async (req) => {
                 message: `تمت إضافة ${uname} بنجاح`,
                 convertedFromUnconfirmed: true,
               });
+            }
+
+            // Legacy private-link parser issue in old MTProto servers
+            if (
+              action === "getGroupMembers" &&
+              typeof params.groupLink === "string" &&
+              isPrivateInviteLink(params.groupLink) &&
+              combinedErrorText.includes("No user has") &&
+              combinedErrorText.includes("as username")
+            ) {
+              return errorResponse(
+                "فشل استخراج أعضاء المجموعة الخاصة بسبب نسخة قديمة من خادم MTProto (Railway). حدّث خادم Railway إلى آخر كود ثم أعد المحاولة.",
+                500,
+                true,
+              );
             }
 
             // Fallback: ALL non-OK upstream responses return HTTP 200 to prevent blank screen
