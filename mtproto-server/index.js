@@ -32,7 +32,7 @@ app.get('/', (req, res) => {
   res.json({ 
     status: 'ok', 
     message: 'Telegram MTProto Server is running',
-    version: '1.0.0'
+    version: '2.0.0'
   });
 });
 
