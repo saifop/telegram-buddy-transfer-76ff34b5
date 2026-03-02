@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -16,8 +16,9 @@ import {
   Users,
   Clock,
   RefreshCw,
-  Loader2,
+  CheckSquare,
 } from "lucide-react";
+import { Checkbox } from "@/components/ui/checkbox";
 import { toast } from "sonner";
 
 interface MonitoringPanelProps {
@@ -48,12 +49,8 @@ interface MonitoringSession {
 }
 
 export function MonitoringPanel({ accounts }: MonitoringPanelProps) {
-  const [groups, setGroups] = useState<string[]>(() => {
-    try {
-      const saved = localStorage.getItem("monitor_groups");
-      return saved ? JSON.parse(saved) : [""];
-    } catch { return [""]; }
-  });
+  const [groups, setGroups] = useState<string[]>([""]);
+  const [selectedAccounts, setSelectedAccounts] = useState<Set<string>>(new Set());
   const [activeSession, setActiveSession] = useState<MonitoringSession | null>(null);
   const [members, setMembers] = useState<MonitoredMember[]>([]);
   const [isStarting, setIsStarting] = useState(false);
@@ -70,11 +67,6 @@ export function MonitoringPanel({ accounts }: MonitoringPanelProps) {
     (a) => a.status === "connected" && a.sessionString
   );
 
-  // Persist groups to localStorage
-  useEffect(() => {
-    try { localStorage.setItem("monitor_groups", JSON.stringify(groups)); } catch {}
-  }, [groups]);
-
   // Load active session on mount
   useEffect(() => {
     loadActiveSession();
@@ -84,14 +76,10 @@ export function MonitoringPanel({ accounts }: MonitoringPanelProps) {
   useEffect(() => {
     if (!activeSession || activeSession.status !== "running") return;
 
-    // Initial load
-    loadMembers(activeSession.id);
-    checkLiveStatus(activeSession.id);
-
     const interval = setInterval(() => {
       loadMembers(activeSession.id);
       checkLiveStatus(activeSession.id);
-    }, 8000);
+    }, 10000); // every 10s
 
     return () => clearInterval(interval);
   }, [activeSession]);
@@ -112,6 +100,7 @@ export function MonitoringPanel({ accounts }: MonitoringPanelProps) {
       loadMembers(session.id);
       checkLiveStatus(session.id);
     } else {
+      // Check for most recent stopped session
       const { data: stopped } = await supabase
         .from("monitoring_sessions")
         .select("*")
@@ -164,14 +153,31 @@ export function MonitoringPanel({ accounts }: MonitoringPanelProps) {
     setGroups((prev) => prev.map((g, i) => (i === index ? value : g)));
   };
 
+  const toggleAccount = (id: string) => {
+    setSelectedAccounts((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const selectAllAccounts = () => {
+    if (selectedAccounts.size === connectedAccounts.length) {
+      setSelectedAccounts(new Set());
+    } else {
+      setSelectedAccounts(new Set(connectedAccounts.map((a) => a.id)));
+    }
+  };
+
   const handleStart = async () => {
     const validGroups = groups.filter((g) => g.trim());
     if (validGroups.length === 0) {
       toast.error("أدخل رابط مجموعة واحد على الأقل");
       return;
     }
-    if (connectedAccounts.length === 0) {
-      toast.error("لا توجد حسابات متصلة - أضف حساب أولاً من تبويب الحسابات");
+    if (selectedAccounts.size === 0) {
+      toast.error("اختر حساب واحد على الأقل");
       return;
     }
 
@@ -182,7 +188,10 @@ export function MonitoringPanel({ accounts }: MonitoringPanelProps) {
         .insert({
           status: "idle",
           groups: validGroups as unknown as any,
-          accounts: connectedAccounts.map((a) => ({ phone: a.phone })) as unknown as any,
+          accounts: Array.from(selectedAccounts).map((id) => {
+            const acc = accounts.find((a) => a.id === id);
+            return { phone: acc?.phone || "" };
+          }) as unknown as any,
         })
         .select()
         .single();
@@ -193,12 +202,15 @@ export function MonitoringPanel({ accounts }: MonitoringPanelProps) {
         return;
       }
 
-      const accountsData = connectedAccounts.map((a) => ({
-        phone: a.phone,
-        sessionString: a.sessionString,
-        apiId: a.apiId,
-        apiHash: a.apiHash,
-      }));
+      const accountsData = Array.from(selectedAccounts)
+        .map((id) => accounts.find((a) => a.id === id))
+        .filter(Boolean)
+        .map((a) => ({
+          phone: a!.phone,
+          sessionString: a!.sessionString,
+          apiId: a!.apiId,
+          apiHash: a!.apiHash,
+        }));
 
       const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
       const supabaseKey = import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY;
@@ -225,7 +237,7 @@ export function MonitoringPanel({ accounts }: MonitoringPanelProps) {
           accounts: accountsData.map((a) => ({ phone: a.phone })),
         } as unknown as MonitoringSession;
         setActiveSession(updated);
-        toast.success(`بدأ الاستخراج والمراقبة - ${data?.membersExtracted || 0} عضو موجود`);
+        toast.success(data?.message || "تم بدء المراقبة");
       }
     } catch (err: any) {
       toast.error("خطأ: " + (err.message || "فشل بدء المراقبة"));
@@ -277,10 +289,12 @@ export function MonitoringPanel({ accounts }: MonitoringPanelProps) {
     }
   };
 
-  const handleNewSession = () => {
+  const handleNewSession = async () => {
     setActiveSession(null);
     setMembers([]);
     setLiveStatus(null);
+    setGroups([""]);
+    setSelectedAccounts(new Set());
   };
 
   const formatUptime = (seconds: number) => {
@@ -306,20 +320,22 @@ export function MonitoringPanel({ accounts }: MonitoringPanelProps) {
 
   return (
     <div className="h-full grid grid-cols-1 lg:grid-cols-3 gap-4">
-      {/* Config + Status Panel */}
+      {/* Config Panel */}
       <div className="lg:col-span-1 flex flex-col gap-4 overflow-hidden">
-        {/* Active session status */}
-        {activeSession && isRunning && (
-          <Card className="border-primary/30">
+        {/* Status Card */}
+        {activeSession && (
+          <Card>
             <CardHeader className="pb-2">
               <CardTitle className="text-sm flex items-center gap-2">
-                <Radio className="w-4 h-4 text-green-500 animate-pulse" />
-                المراقبة نشطة
+                <Radio className={`w-4 h-4 ${isRunning ? "text-green-500 animate-pulse" : "text-muted-foreground"}`} />
+                حالة المراقبة
               </CardTitle>
             </CardHeader>
             <CardContent className="space-y-2">
               <div className="flex items-center gap-2">
-                <Badge>نشطة</Badge>
+                <Badge variant={isRunning ? "default" : "secondary"}>
+                  {isRunning ? "نشطة" : "متوقفة"}
+                </Badge>
                 {liveStatus?.uptime != null && (
                   <span className="text-xs text-muted-foreground flex items-center gap-1">
                     <Clock className="w-3 h-3" />
@@ -329,22 +345,28 @@ export function MonitoringPanel({ accounts }: MonitoringPanelProps) {
               </div>
               <div className="text-sm space-y-1">
                 <p>المجموعات: {activeSession.groups?.length || 0}</p>
-                <p>الحسابات: {liveStatus?.connectedAccounts || activeSession.accounts?.length || 0}</p>
-                <p className="font-semibold text-primary">
-                  الأعضاء: {liveStatus?.membersFound ?? members.length}
+                <p>الحسابات المتصلة: {liveStatus?.connectedAccounts || activeSession.accounts?.length || 0}</p>
+                <p className="font-semibold">
+                  الأعضاء المكتشفين: {liveStatus?.membersFound ?? members.length}
                 </p>
               </div>
               <div className="flex gap-2">
-                <Button
-                  variant="destructive"
-                  size="sm"
-                  onClick={handleStop}
-                  disabled={isStopping}
-                  className="flex-1"
-                >
-                  <Square className="w-3 h-3 ml-1" />
-                  {isStopping ? "جاري الإيقاف..." : "إيقاف"}
-                </Button>
+                {isRunning ? (
+                  <Button
+                    variant="destructive"
+                    size="sm"
+                    onClick={handleStop}
+                    disabled={isStopping}
+                    className="flex-1"
+                  >
+                    <Square className="w-3 h-3 ml-1" />
+                    {isStopping ? "جاري الإيقاف..." : "إيقاف المراقبة"}
+                  </Button>
+                ) : (
+                  <Button variant="outline" size="sm" onClick={handleNewSession} className="flex-1">
+                    جلسة جديدة
+                  </Button>
+                )}
                 <Button variant="ghost" size="icon" onClick={handleRefresh} className="h-8 w-8">
                   <RefreshCw className="w-3 h-3" />
                 </Button>
@@ -353,14 +375,16 @@ export function MonitoringPanel({ accounts }: MonitoringPanelProps) {
           </Card>
         )}
 
-        {/* Setup - show when no running session */}
-        {(!activeSession || activeSession.status !== "running") && (
+        {/* Setup Card - show only when no active session */}
+        {(!activeSession || activeSession.status === "stopped") && (
           <Card>
             <CardHeader className="pb-2">
-              <CardTitle className="text-sm">حط الروابط وابدأ</CardTitle>
+              <CardTitle className="text-sm">إعداد المراقبة</CardTitle>
             </CardHeader>
             <CardContent className="space-y-3">
+              {/* Groups */}
               <div className="space-y-2">
+                <label className="text-xs font-medium text-muted-foreground">روابط المجموعات</label>
                 {groups.map((g, i) => (
                   <div key={i} className="flex gap-1">
                     <Input
@@ -388,34 +412,44 @@ export function MonitoringPanel({ accounts }: MonitoringPanelProps) {
                 </Button>
               </div>
 
-              <div className="text-xs text-muted-foreground">
-                سيتم استخدام جميع الحسابات المتصلة ({connectedAccounts.length}) تلقائياً
+              {/* Accounts */}
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <label className="text-xs font-medium text-muted-foreground">الحسابات</label>
+                  <Button variant="ghost" size="sm" onClick={selectAllAccounts} className="h-6 text-xs px-2">
+                    <CheckSquare className="w-3 h-3 ml-1" />
+                    {selectedAccounts.size === connectedAccounts.length ? "إلغاء الكل" : "تحديد الكل"}
+                  </Button>
+                </div>
+                {connectedAccounts.length === 0 ? (
+                  <p className="text-xs text-muted-foreground">لا توجد حسابات متصلة</p>
+                ) : (
+                  <ScrollArea className="max-h-32">
+                    <div className="space-y-1">
+                      {connectedAccounts.map((acc) => (
+                        <div
+                          key={acc.id}
+                          className="flex items-center gap-2 p-1.5 rounded hover:bg-muted/50 cursor-pointer"
+                          onClick={() => toggleAccount(acc.id)}
+                        >
+                          <Checkbox checked={selectedAccounts.has(acc.id)} />
+                          <span className="text-xs" dir="ltr">{acc.phone}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </ScrollArea>
+                )}
               </div>
 
               <Button
                 onClick={handleStart}
-                disabled={isStarting || connectedAccounts.length === 0}
+                disabled={isStarting}
                 className="w-full"
                 size="sm"
               >
-                {isStarting ? (
-                  <>
-                    <Loader2 className="w-3 h-3 ml-1 animate-spin" />
-                    جاري البدء...
-                  </>
-                ) : (
-                  <>
-                    <Radio className="w-3 h-3 ml-1" />
-                    ابدأ الاستخراج والمراقبة
-                  </>
-                )}
+                <Radio className="w-3 h-3 ml-1" />
+                {isStarting ? "جاري البدء..." : "بدء المراقبة"}
               </Button>
-
-              {activeSession?.status === "stopped" && (
-                <Button variant="outline" size="sm" onClick={handleNewSession} className="w-full text-xs">
-                  جلسة جديدة
-                </Button>
-              )}
             </CardContent>
           </Card>
         )}
@@ -439,7 +473,7 @@ export function MonitoringPanel({ accounts }: MonitoringPanelProps) {
                   className="h-7 text-xs"
                 >
                   <Download className="w-3 h-3 ml-1" />
-                  تحميل
+                  تحميل JSON
                 </Button>
                 <Button variant="ghost" size="icon" onClick={handleRefresh} className="h-7 w-7">
                   <RefreshCw className="w-3 h-3" />
@@ -460,13 +494,11 @@ export function MonitoringPanel({ accounts }: MonitoringPanelProps) {
                   <Eye className="w-8 h-8 mb-2 opacity-50" />
                   <p className="text-sm">
                     {members.length === 0
-                      ? isRunning
-                        ? "جاري الاستخراج... سيظهر الأعضاء تلقائياً"
-                        : "لم يتم اكتشاف أعضاء بعد"
+                      ? "لم يتم اكتشاف أعضاء بعد"
                       : "لا توجد نتائج مطابقة"}
                   </p>
                   {isRunning && members.length === 0 && (
-                    <Loader2 className="w-5 h-5 mt-2 animate-spin text-primary" />
+                    <p className="text-xs mt-1">المراقبة نشطة... سيتم إظهار الأعضاء تلقائياً</p>
                   )}
                 </div>
               ) : (
