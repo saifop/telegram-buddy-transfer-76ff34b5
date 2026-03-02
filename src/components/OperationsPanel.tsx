@@ -47,6 +47,7 @@ export function OperationsPanel({
   const [progress, setProgress] = useState({ current: 0, total: 0 });
   const [extractedMembers, setExtractedMembers] = useState<Member[]>([]);
   const [delaySeconds, setDelaySeconds] = useState(30);
+  const [resolvedChatId, setResolvedChatId] = useState<string | null>(null);
 
   const selectedAccountsList = accounts.filter((a) => a.isSelected);
 
@@ -94,6 +95,11 @@ export function OperationsPanel({
           addLog("error", `فشل انضمام ${account.phone}: ${error?.message || data?.error}`, account.phone);
         } else {
           successCount++;
+          // Capture chatId from first successful join
+          if (data?.chatId && !resolvedChatId) {
+            setResolvedChatId(data.chatId.toString());
+            addLog("info", `تم الحصول على chatId تلقائياً: ${data.chatId}`, account.phone);
+          }
           addLog("success", `تم انضمام ${account.phone} بنجاح`, account.phone);
         }
       } catch (err) {
@@ -146,16 +152,21 @@ export function OperationsPanel({
           throw new Error("توقف أمان: عدد دفعات كبير جداً");
         }
 
+        const extractBody: any = {
+          action: "getGroupMembers",
+          sessionString: account.sessionString,
+          groupLink: sourceGroup,
+          apiId: account.apiId,
+          apiHash: account.apiHash,
+          limit,
+          offset,
+        };
+        if (resolvedChatId) {
+          extractBody.chatId = resolvedChatId;
+        }
+
         const { data, error } = await supabase.functions.invoke("telegram-auth", {
-          body: {
-            action: "getGroupMembers",
-            sessionString: account.sessionString,
-            groupLink: sourceGroup,
-            apiId: account.apiId,
-            apiHash: account.apiHash,
-            limit,
-            offset,
-          },
+          body: extractBody,
         });
 
         if (error || data?.error) {
@@ -290,6 +301,7 @@ export function OperationsPanel({
     setTargetGroup("");
     setExtractedMembers([]);
     setProgress({ current: 0, total: 0 });
+    setResolvedChatId(null);
   };
 
   const progressPercent = progress.total > 0 ? (progress.current / progress.total) * 100 : 0;
