@@ -144,8 +144,8 @@ Deno.serve(async (req) => {
 
         const controller = new AbortController();
         // Give extraction/join actions more time (120s), others 30s
-        const longActions = ["getGroupMembers", "joinGroup", "addMemberToGroup"];
-        const timeoutMs = longActions.includes(action) ? 300_000 : 30_000; // 5 min for extraction
+        const longActions = ["getGroupMembers", "joinGroup", "addMemberToGroup", "startMonitoring", "stopMonitoring", "getMonitoringStatus"];
+        const timeoutMs = longActions.includes(action) ? 300_000 : 30_000; // 5 min for long actions
         const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
         const response = await fetch(serviceEndpoint, {

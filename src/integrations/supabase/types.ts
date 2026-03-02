@@ -14,6 +14,86 @@ export type Database = {
   }
   public: {
     Tables: {
+      monitored_members: {
+        Row: {
+          access_hash: string | null
+          discovered_at: string
+          first_name: string | null
+          id: string
+          last_name: string | null
+          message_text: string | null
+          session_id: string
+          source_group: string | null
+          telegram_user_id: string
+          username: string | null
+        }
+        Insert: {
+          access_hash?: string | null
+          discovered_at?: string
+          first_name?: string | null
+          id?: string
+          last_name?: string | null
+          message_text?: string | null
+          session_id: string
+          source_group?: string | null
+          telegram_user_id: string
+          username?: string | null
+        }
+        Update: {
+          access_hash?: string | null
+          discovered_at?: string
+          first_name?: string | null
+          id?: string
+          last_name?: string | null
+          message_text?: string | null
+          session_id?: string
+          source_group?: string | null
+          telegram_user_id?: string
+          username?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "monitored_members_session_id_fkey"
+            columns: ["session_id"]
+            isOneToOne: false
+            referencedRelation: "monitoring_sessions"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      monitoring_sessions: {
+        Row: {
+          accounts: Json
+          created_at: string
+          groups: Json
+          id: string
+          started_at: string | null
+          status: string
+          stopped_at: string | null
+          total_members_found: number
+        }
+        Insert: {
+          accounts?: Json
+          created_at?: string
+          groups?: Json
+          id?: string
+          started_at?: string | null
+          status?: string
+          stopped_at?: string | null
+          total_members_found?: number
+        }
+        Update: {
+          accounts?: Json
+          created_at?: string
+          groups?: Json
+          id?: string
+          started_at?: string | null
+          status?: string
+          stopped_at?: string | null
+          total_members_found?: number
+        }
+        Relationships: []
+      }
       telegram_sessions: {
         Row: {
           api_hash: string

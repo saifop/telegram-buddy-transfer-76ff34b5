@@ -12,6 +12,7 @@ import { MembersList, type Member } from "@/components/MembersList";
 import { AddMembersPanel } from "@/components/AddMembersPanel";
 import { ExtractMembersDialog } from "@/components/ExtractMembersDialog";
 import { ActiveMembersExtractor } from "@/components/ActiveMembersExtractor";
+import { MonitoringPanel } from "@/components/MonitoringPanel";
 import { ExtractedMembersFile } from "@/components/ExtractedMembersFile";
 import { FiveSimPanel } from "@/components/FiveSimPanel";
 import { Button } from "@/components/ui/button";
@@ -316,9 +317,10 @@ const Index = () => {
           {/* Main Content with Tabs */}
           <div className="flex-1 p-4 overflow-hidden">
             <Tabs value={activeTab} onValueChange={setActiveTab} className="h-full flex flex-col">
-              <TabsList className="grid w-full max-w-md grid-cols-2 mb-4">
+              <TabsList className="grid w-full max-w-lg grid-cols-3 mb-4">
                 <TabsTrigger value="accounts">الحسابات والمجموعات</TabsTrigger>
                 <TabsTrigger value="members">إدارة الأعضاء</TabsTrigger>
+                <TabsTrigger value="monitoring">المراقبة</TabsTrigger>
               </TabsList>
 
               {/* Accounts Tab */}
@@ -404,6 +406,11 @@ const Index = () => {
                     <LogsPanel logs={logs} onClear={() => setLogs([])} />
                   </div>
                 </div>
+              </TabsContent>
+
+              {/* Monitoring Tab */}
+              <TabsContent value="monitoring" className="flex-1 mt-0 overflow-hidden">
+                <MonitoringPanel accounts={accounts} />
               </TabsContent>
             </Tabs>
           </div>
