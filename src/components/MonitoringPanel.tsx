@@ -79,7 +79,7 @@ export function MonitoringPanel({ accounts }: MonitoringPanelProps) {
     const interval = setInterval(() => {
       loadMembers(activeSession.id);
       checkLiveStatus(activeSession.id);
-    }, 10000); // every 10s
+    }, 1000); // every 1s for near real-time updates
 
     return () => clearInterval(interval);
   }, [activeSession]);
