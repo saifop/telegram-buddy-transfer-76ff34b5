@@ -1052,9 +1052,46 @@ async function handleStartMonitoring({ accounts, groups, sessionId, supabaseUrl,
     startedAt: Date.now(),
     membersFound: 0,
     errors: [],
+    resolvedChatIds: new Set(), // Store resolved chat IDs to filter messages
   };
 
   console.log(`[Monitor ${sessionId}] Starting monitoring for ${groups.length} groups with ${accounts.length} accounts`);
+
+  // Helper: store member in Supabase
+  const storeMember = async (memberData) => {
+    try {
+      const response = await fetch(`${supabaseUrl}/rest/v1/monitored_members`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'apikey': supabaseKey,
+          'Authorization': `Bearer ${supabaseKey}`,
+          'Prefer': 'resolution=ignore-duplicates',
+        },
+        body: JSON.stringify(memberData),
+      });
+      
+      if (response.ok || response.status === 201) {
+        monitor.membersFound++;
+        if (monitor.membersFound % 50 === 0) {
+          fetch(`${supabaseUrl}/rest/v1/monitoring_sessions?id=eq.${sessionId}`, {
+            method: 'PATCH',
+            headers: {
+              'Content-Type': 'application/json',
+              'apikey': supabaseKey,
+              'Authorization': `Bearer ${supabaseKey}`,
+            },
+            body: JSON.stringify({ total_members_found: monitor.membersFound }),
+          }).catch(() => {});
+        }
+        return true;
+      }
+      return false;
+    } catch (e) {
+      console.error(`[Monitor ${sessionId}] DB store error: ${e.message}`);
+      return false;
+    }
+  };
 
   // Distribute groups across accounts
   const connectedClients = [];
@@ -1067,7 +1104,7 @@ async function handleStartMonitoring({ accounts, groups, sessionId, supabaseUrl,
         account.apiHash || 'demo'
       );
       
-      // Join assigned groups
+      // Assign groups to this account
       const assignedGroups = [];
       for (let g = 0; g < groups.length; g++) {
         if (g % accounts.length === i) {
@@ -1075,15 +1112,27 @@ async function handleStartMonitoring({ accounts, groups, sessionId, supabaseUrl,
         }
       }
 
-      // Join each group
+      const resolvedEntities = []; // { entity, groupLink, title }
+
+      // Join each group and resolve entity
       for (const groupLink of assignedGroups) {
         try {
           const { type, value } = parseGroupLink(groupLink);
+          let entity = null;
+
           if (type === 'hash') {
             try {
-              await client.invoke(new Api.messages.ImportChatInvite({ hash: value }));
+              const joinResult = await client.invoke(new Api.messages.ImportChatInvite({ hash: value }));
+              if (joinResult?.chats?.length > 0) entity = joinResult.chats[0];
             } catch (e) {
               if (!e.message?.includes('USER_ALREADY_PARTICIPANT')) throw e;
+            }
+            // If already participant, resolve via CheckChatInvite
+            if (!entity) {
+              try {
+                const checkResult = await client.invoke(new Api.messages.CheckChatInvite({ hash: value }));
+                entity = checkResult?.chat || null;
+              } catch (e) {}
             }
           } else {
             try {
@@ -1091,24 +1140,115 @@ async function handleStartMonitoring({ accounts, groups, sessionId, supabaseUrl,
             } catch (e) {
               if (!e.message?.includes('USER_ALREADY_PARTICIPANT')) throw e;
             }
+            try {
+              entity = await client.getEntity(value);
+            } catch (e) {}
           }
-          console.log(`[Monitor ${sessionId}] Account ${account.phone} joined ${groupLink}`);
+
+          if (entity) {
+            const chatId = entity.id?.value !== undefined ? entity.id.value.toString() : entity.id?.toString();
+            if (chatId) monitor.resolvedChatIds.add(chatId);
+            resolvedEntities.push({ entity, groupLink, title: entity.title || value });
+            console.log(`[Monitor ${sessionId}] Account ${account.phone} joined ${groupLink} (ID: ${chatId})`);
+          } else {
+            console.error(`[Monitor ${sessionId}] Could not resolve entity for ${groupLink}`);
+            monitor.errors.push(`فشل تحديد مجموعة ${groupLink}`);
+          }
         } catch (joinErr) {
           console.error(`[Monitor ${sessionId}] Failed to join ${groupLink}: ${joinErr.message}`);
           monitor.errors.push(`فشل انضمام ${account.phone} لـ ${groupLink}: ${joinErr.message}`);
         }
       }
 
-      // Set up new message handler
+      // === PHASE 1: Extract ALL existing members from each group ===
+      for (const { entity, title } of resolvedEntities) {
+        console.log(`[Monitor ${sessionId}] Extracting existing members from "${title}"...`);
+        let extractedCount = 0;
+        const seenIds = new Set();
+
+        // Use GetParticipants with multiple search queries
+        const searchQueries = [
+          '', 'a','b','c','d','e','f','g','h','i','j','k','l','m',
+          'n','o','p','q','r','s','t','u','v','w','x','y','z',
+          '0','1','2','3','4','5','6','7','8','9',
+          'ا','ب','ت','ث','ج','ح','خ','د','ذ','ر','ز','س','ش',
+          'ص','ض','ط','ظ','ع','غ','ف','ق','ك','ل','م','ن','ه','و','ي',
+        ];
+
+        for (const q of searchQueries) {
+          let offset = 0;
+          while (true) {
+            try {
+              const participants = await client.invoke(
+                new Api.channels.GetParticipants({
+                  channel: entity,
+                  filter: new Api.ChannelParticipantsSearch({ q }),
+                  offset,
+                  limit: 200,
+                  hash: BigInt(0),
+                })
+              );
+
+              const users = participants.users || [];
+              if (users.length === 0) break;
+
+              for (const u of users) {
+                const uid = u.id?.toString();
+                if (uid && !seenIds.has(uid) && !u.bot) {
+                  seenIds.add(uid);
+                  const stored = await storeMember({
+                    session_id: sessionId,
+                    telegram_user_id: uid,
+                    username: u.username || null,
+                    first_name: u.firstName || null,
+                    last_name: u.lastName || null,
+                    access_hash: u.accessHash ? u.accessHash.toString() : null,
+                    source_group: title,
+                    message_text: null,
+                  });
+                  if (stored) extractedCount++;
+                }
+              }
+
+              if (users.length < 200) break;
+              offset += users.length;
+              await new Promise(r => setTimeout(r, 300));
+            } catch (err) {
+              const msg = err.message || '';
+              if (msg.includes('FLOOD')) {
+                const waitMatch = msg.match(/FLOOD_WAIT[_\s]*(\d+)/i);
+                const waitSec = waitMatch ? parseInt(waitMatch[1]) : 5;
+                console.log(`[Monitor ${sessionId}] FLOOD_WAIT ${waitSec}s during extraction, waiting...`);
+                await new Promise(r => setTimeout(r, (waitSec + 1) * 1000));
+                continue;
+              }
+              if (msg.includes('CHAT_ADMIN_REQUIRED')) {
+                console.log(`[Monitor ${sessionId}] Not admin in "${title}", skipping GetParticipants extraction`);
+                break;
+              }
+              break;
+            }
+          }
+        }
+        console.log(`[Monitor ${sessionId}] Extracted ${extractedCount} existing members from "${title}"`);
+      }
+
+      // === PHASE 2: Set up real-time message handler (only for monitored groups) ===
       const { NewMessage } = require('telegram/events');
+      const monitorChatIds = new Set([...monitor.resolvedChatIds]);
+      
       const handler = async (event) => {
         try {
           const message = event.message;
           if (!message || !message.senderId) return;
           
+          // Filter: only process messages from monitored groups
+          const chatId = message.chatId || message.peerId?.channelId;
+          const chatIdStr = chatId?.value !== undefined ? chatId.value.toString() : chatId?.toString();
+          if (!chatIdStr || !monitorChatIds.has(chatIdStr)) return;
+          
           const senderId = message.senderId.toString();
           
-          // Get sender info
           let senderUsername = null;
           let senderFirstName = null;
           let senderLastName = null;
@@ -1118,16 +1258,14 @@ async function handleStartMonitoring({ accounts, groups, sessionId, supabaseUrl,
           try {
             const sender = await message.getSender();
             if (sender) {
+              if (sender.bot) return; // Skip bots
               senderUsername = sender.username || null;
               senderFirstName = sender.firstName || null;
               senderLastName = sender.lastName || null;
               senderAccessHash = sender.accessHash ? sender.accessHash.toString() : null;
             }
-          } catch (e) {
-            // Ignore sender fetch errors
-          }
+          } catch (e) {}
 
-          // Get chat info for source group
           try {
             const chat = await message.getChat();
             if (chat) {
@@ -1135,8 +1273,7 @@ async function handleStartMonitoring({ accounts, groups, sessionId, supabaseUrl,
             }
           } catch (e) {}
 
-          // Store in Supabase (upsert - ignore duplicates)
-          const memberData = {
+          const stored = await storeMember({
             session_id: sessionId,
             telegram_user_id: senderId,
             username: senderUsername,
@@ -1145,41 +1282,10 @@ async function handleStartMonitoring({ accounts, groups, sessionId, supabaseUrl,
             access_hash: senderAccessHash,
             source_group: sourceGroup,
             message_text: (message.text || '').substring(0, 200),
-          };
-
-          try {
-            const response = await fetch(`${supabaseUrl}/rest/v1/monitored_members`, {
-              method: 'POST',
-              headers: {
-                'Content-Type': 'application/json',
-                'apikey': supabaseKey,
-                'Authorization': `Bearer ${supabaseKey}`,
-                'Prefer': 'resolution=ignore-duplicates',
-              },
-              body: JSON.stringify(memberData),
-            });
-            
-            if (response.ok || response.status === 201 || response.status === 409) {
-              // Update count (only on 201)
-              if (response.status === 201 || response.ok) {
-                monitor.membersFound++;
-                // Update session count in Supabase
-                if (monitor.membersFound % 10 === 0) {
-                  fetch(`${supabaseUrl}/rest/v1/monitoring_sessions?id=eq.${sessionId}`, {
-                    method: 'PATCH',
-                    headers: {
-                      'Content-Type': 'application/json',
-                      'apikey': supabaseKey,
-                      'Authorization': `Bearer ${supabaseKey}`,
-                    },
-                    body: JSON.stringify({ total_members_found: monitor.membersFound }),
-                  }).catch(() => {});
-                }
-              }
-              console.log(`[Monitor ${sessionId}] New member: ${senderUsername || senderId} from ${sourceGroup}`);
-            }
-          } catch (dbErr) {
-            console.error(`[Monitor ${sessionId}] DB store error: ${dbErr.message}`);
+          });
+          
+          if (stored) {
+            console.log(`[Monitor ${sessionId}] New member from message: ${senderUsername || senderId} in ${sourceGroup}`);
           }
         } catch (handlerErr) {
           console.error(`[Monitor ${sessionId}] Handler error: ${handlerErr.message}`);
@@ -1205,7 +1311,7 @@ async function handleStartMonitoring({ accounts, groups, sessionId, supabaseUrl,
   monitor.clients = connectedClients;
   activeMonitors.set(sessionId, monitor);
 
-  // Update session status in Supabase
+  // Update session status
   try {
     await fetch(`${supabaseUrl}/rest/v1/monitoring_sessions?id=eq.${sessionId}`, {
       method: 'PATCH',
@@ -1214,7 +1320,11 @@ async function handleStartMonitoring({ accounts, groups, sessionId, supabaseUrl,
         'apikey': supabaseKey,
         'Authorization': `Bearer ${supabaseKey}`,
       },
-      body: JSON.stringify({ status: 'running', started_at: new Date().toISOString() }),
+      body: JSON.stringify({ 
+        status: 'running', 
+        started_at: new Date().toISOString(),
+        total_members_found: monitor.membersFound,
+      }),
     });
   } catch (e) {}
 
@@ -1223,8 +1333,9 @@ async function handleStartMonitoring({ accounts, groups, sessionId, supabaseUrl,
     connectedAccounts: connectedClients.length,
     totalAccounts: accounts.length,
     monitoringGroups: groups.length,
+    membersExtracted: monitor.membersFound,
     errors: monitor.errors,
-    message: `بدأت المراقبة بـ ${connectedClients.length} حساب على ${groups.length} مجموعة`,
+    message: `تم استخراج ${monitor.membersFound} عضو موجود وبدأت المراقبة بـ ${connectedClients.length} حساب`,
   });
 }
 
