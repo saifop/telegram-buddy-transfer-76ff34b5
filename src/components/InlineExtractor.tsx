@@ -140,6 +140,8 @@ export function InlineExtractor({
         const queryNum = i + 2;
 
         try {
+          // Only send last 200 knownIds to avoid request size limits
+          const knownArr = Array.from(seenIds);
           const batchBody: any = {
             action: "getGroupMembers",
             sessionString: account.sessionString,
@@ -147,7 +149,7 @@ export function InlineExtractor({
             apiHash: account.apiHash,
             groupLink: link,
             searchQuery: q,
-            knownIds: Array.from(seenIds),
+            knownIds: knownArr.length > 200 ? knownArr.slice(-200) : knownArr,
           };
           if (resolvedChatId) batchBody.chatId = resolvedChatId;
 
