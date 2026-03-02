@@ -124,7 +124,12 @@ Deno.serve(async (req) => {
 
     // If external service is configured, proxy requests to it
     if (mtprotoServiceUrl) {
-      console.log(`Using external MTProto service: ${mtprotoServiceUrl}`);
+      // Ensure the URL ends with /auth (the Railway server's POST endpoint)
+      let serviceEndpoint = mtprotoServiceUrl.replace(/\/+$/, "");
+      if (!serviceEndpoint.endsWith("/auth")) {
+        serviceEndpoint += "/auth";
+      }
+      console.log(`Using external MTProto service: ${serviceEndpoint}`);
       try {
         // Normalize private invite links: convert +hash format to joinchat/hash
         // for compatibility with older Railway server versions
@@ -143,7 +148,7 @@ Deno.serve(async (req) => {
         const timeoutMs = longActions.includes(action) ? 300_000 : 30_000; // 5 min for extraction
         const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
-        const response = await fetch(mtprotoServiceUrl, {
+        const response = await fetch(serviceEndpoint, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ action, ...normalizedParams }),
@@ -191,7 +196,7 @@ Deno.serve(async (req) => {
 
               for (const joinBody of fallbackBodies) {
               try {
-                const joinResponse = await fetch(mtprotoServiceUrl, {
+                const joinResponse = await fetch(serviceEndpoint, {
                   method: "POST",
                   headers: { "Content-Type": "application/json" },
                   body: JSON.stringify(joinBody),
@@ -240,7 +245,7 @@ Deno.serve(async (req) => {
             for (const retryBody of retryPayloads) {
               try {
                 console.log(`Retry attempt with body keys: ${Object.keys(retryBody).join(', ')}`);
-                const retryResponse = await fetch(mtprotoServiceUrl, {
+                const retryResponse = await fetch(serviceEndpoint, {
                   method: "POST",
                   headers: { "Content-Type": "application/json" },
                   body: JSON.stringify(retryBody),
