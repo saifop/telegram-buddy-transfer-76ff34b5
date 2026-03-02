@@ -10,8 +10,7 @@ import { LogsPanel } from "@/components/LogsPanel";
 import { ControlBar } from "@/components/ControlBar";
 import { MembersList, type Member } from "@/components/MembersList";
 import { AddMembersPanel } from "@/components/AddMembersPanel";
-import { ExtractMembersDialog } from "@/components/ExtractMembersDialog";
-import { ActiveMembersExtractor } from "@/components/ActiveMembersExtractor";
+import { InlineExtractor } from "@/components/InlineExtractor";
 import { MonitoringPanel } from "@/components/MonitoringPanel";
 import { ExtractedMembersFile } from "@/components/ExtractedMembersFile";
 import { FiveSimPanel } from "@/components/FiveSimPanel";
@@ -360,18 +359,11 @@ const Index = () => {
               <TabsContent value="members" className="flex-1 mt-0 overflow-hidden">
                 <div className="h-full grid grid-cols-1 lg:grid-cols-3 gap-4">
                   <div className="lg:col-span-1 overflow-hidden flex flex-col gap-3">
-                    <div className="flex gap-2 flex-wrap">
-                      <ExtractMembersDialog
-                        accounts={accounts}
-                        onMembersExtracted={handleImportMembers}
-                        addLog={addLog}
-                      />
-                      <ActiveMembersExtractor
-                        accounts={accounts}
-                        onMembersExtracted={handleImportMembers}
-                        addLog={addLog}
-                      />
-                    </div>
+                    <InlineExtractor
+                      accounts={accounts}
+                      onMembersExtracted={handleImportMembers}
+                      addLog={addLog}
+                    />
                     <ExtractedMembersFile
                       members={members}
                       onImportMembers={handleImportMembers}
