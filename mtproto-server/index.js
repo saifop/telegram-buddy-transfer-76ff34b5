@@ -1053,6 +1053,7 @@ async function handleStartMonitoring({ accounts, groups, sessionId, supabaseUrl,
     membersFound: 0,
     errors: [],
     resolvedChatIds: new Set(), // Store resolved chat IDs to filter messages
+    stopRequested: false,
   };
 
   console.log(`[Monitor ${sessionId}] Starting monitoring for ${groups.length} groups with ${accounts.length} accounts`);
@@ -1160,97 +1161,23 @@ async function handleStartMonitoring({ accounts, groups, sessionId, supabaseUrl,
         }
       }
 
-      // === PHASE 1: Extract ALL existing members from each group ===
-      for (const { entity, title } of resolvedEntities) {
-        console.log(`[Monitor ${sessionId}] Extracting existing members from "${title}"...`);
-        let extractedCount = 0;
-        const seenIds = new Set();
-
-        // Use GetParticipants with multiple search queries
-        const searchQueries = [
-          '', 'a','b','c','d','e','f','g','h','i','j','k','l','m',
-          'n','o','p','q','r','s','t','u','v','w','x','y','z',
-          '0','1','2','3','4','5','6','7','8','9',
-          'ا','ب','ت','ث','ج','ح','خ','د','ذ','ر','ز','س','ش',
-          'ص','ض','ط','ظ','ع','غ','ف','ق','ك','ل','م','ن','ه','و','ي',
-        ];
-
-        for (const q of searchQueries) {
-          let offset = 0;
-          while (true) {
-            try {
-              const participants = await client.invoke(
-                new Api.channels.GetParticipants({
-                  channel: entity,
-                  filter: new Api.ChannelParticipantsSearch({ q }),
-                  offset,
-                  limit: 200,
-                  hash: BigInt(0),
-                })
-              );
-
-              const users = participants.users || [];
-              if (users.length === 0) break;
-
-              for (const u of users) {
-                const uid = u.id?.toString();
-                if (uid && !seenIds.has(uid) && !u.bot) {
-                  seenIds.add(uid);
-                  const stored = await storeMember({
-                    session_id: sessionId,
-                    telegram_user_id: uid,
-                    username: u.username || null,
-                    first_name: u.firstName || null,
-                    last_name: u.lastName || null,
-                    access_hash: u.accessHash ? u.accessHash.toString() : null,
-                    source_group: title,
-                    message_text: null,
-                  });
-                  if (stored) extractedCount++;
-                }
-              }
-
-              if (users.length < 200) break;
-              offset += users.length;
-              await new Promise(r => setTimeout(r, 300));
-            } catch (err) {
-              const msg = err.message || '';
-              if (msg.includes('FLOOD')) {
-                const waitMatch = msg.match(/FLOOD_WAIT[_\s]*(\d+)/i);
-                const waitSec = waitMatch ? parseInt(waitMatch[1]) : 5;
-                console.log(`[Monitor ${sessionId}] FLOOD_WAIT ${waitSec}s during extraction, waiting...`);
-                await new Promise(r => setTimeout(r, (waitSec + 1) * 1000));
-                continue;
-              }
-              if (msg.includes('CHAT_ADMIN_REQUIRED')) {
-                console.log(`[Monitor ${sessionId}] Not admin in "${title}", skipping GetParticipants extraction`);
-                break;
-              }
-              break;
-            }
-          }
-        }
-        console.log(`[Monitor ${sessionId}] Extracted ${extractedCount} existing members from "${title}"`);
-      }
-
-      // === PHASE 2: Set up real-time message handler (only for monitored groups) ===
+      // === PHASE 2: Set up real-time message handler immediately ===
       const { NewMessage } = require('telegram/events');
-      // Use GramJS built-in chats filter - pass entity objects directly
       const chatEntities = resolvedEntities.map(r => r.entity);
-      
+
       const handler = async (event) => {
         try {
           const message = event.message;
           if (!message || !message.senderId) return;
-          
+
           const senderId = message.senderId.toString();
-          
+
           let senderUsername = null;
           let senderFirstName = null;
           let senderLastName = null;
           let senderAccessHash = null;
           let sourceGroup = null;
-          
+
           try {
             const sender = await message.getSender();
             if (sender) {
@@ -1279,7 +1206,7 @@ async function handleStartMonitoring({ accounts, groups, sessionId, supabaseUrl,
             source_group: sourceGroup,
             message_text: (message.text || '').substring(0, 200),
           });
-          
+
           if (stored) {
             console.log(`[Monitor ${sessionId}] New member from message: ${senderUsername || senderId} in ${sourceGroup}`);
           }
@@ -1291,6 +1218,90 @@ async function handleStartMonitoring({ accounts, groups, sessionId, supabaseUrl,
       client.addEventHandler(handler, new NewMessage({ chats: chatEntities }));
       connectedClients.push({ client, phone: account.phone, handler, assignedGroups });
       console.log(`[Monitor ${sessionId}] Account ${account.phone} connected and listening to ${chatEntities.length} groups ONLY`);
+
+      // === PHASE 1 (background): historical extraction without blocking startMonitoring response ===
+      const runHistoricalExtraction = async () => {
+        for (const { entity, title } of resolvedEntities) {
+          if (monitor.stopRequested || !activeMonitors.has(sessionId)) return;
+
+          console.log(`[Monitor ${sessionId}] Extracting existing members from "${title}" in background...`);
+          let extractedCount = 0;
+          const seenIds = new Set();
+
+          const searchQueries = [
+            '', 'a','b','c','d','e','f','g','h','i','j','k','l','m',
+            'n','o','p','q','r','s','t','u','v','w','x','y','z',
+            '0','1','2','3','4','5','6','7','8','9',
+            'ا','ب','ت','ث','ج','ح','خ','د','ذ','ر','ز','س','ش',
+            'ص','ض','ط','ظ','ع','غ','ف','ق','ك','ل','م','ن','ه','و','ي',
+          ];
+
+          for (const q of searchQueries) {
+            if (monitor.stopRequested || !activeMonitors.has(sessionId)) return;
+            let offset = 0;
+
+            while (true) {
+              if (monitor.stopRequested || !activeMonitors.has(sessionId)) return;
+              try {
+                const participants = await client.invoke(
+                  new Api.channels.GetParticipants({
+                    channel: entity,
+                    filter: new Api.ChannelParticipantsSearch({ q }),
+                    offset,
+                    limit: 200,
+                    hash: BigInt(0),
+                  })
+                );
+
+                const users = participants.users || [];
+                if (users.length === 0) break;
+
+                for (const u of users) {
+                  const uid = u.id?.toString();
+                  if (uid && !seenIds.has(uid) && !u.bot) {
+                    seenIds.add(uid);
+                    const stored = await storeMember({
+                      session_id: sessionId,
+                      telegram_user_id: uid,
+                      username: u.username || null,
+                      first_name: u.firstName || null,
+                      last_name: u.lastName || null,
+                      access_hash: u.accessHash ? u.accessHash.toString() : null,
+                      source_group: title,
+                      message_text: null,
+                    });
+                    if (stored) extractedCount++;
+                  }
+                }
+
+                if (users.length < 200) break;
+                offset += users.length;
+                await new Promise(r => setTimeout(r, 300));
+              } catch (err) {
+                const msg = err.message || '';
+                if (msg.includes('FLOOD')) {
+                  const waitMatch = msg.match(/FLOOD_WAIT[_\s]*(\d+)/i);
+                  const waitSec = waitMatch ? parseInt(waitMatch[1]) : 5;
+                  console.log(`[Monitor ${sessionId}] FLOOD_WAIT ${waitSec}s during extraction, waiting...`);
+                  await new Promise(r => setTimeout(r, (waitSec + 1) * 1000));
+                  continue;
+                }
+                if (msg.includes('CHAT_ADMIN_REQUIRED')) {
+                  console.log(`[Monitor ${sessionId}] Not admin in "${title}", skipping GetParticipants extraction`);
+                  break;
+                }
+                break;
+              }
+            }
+          }
+
+          console.log(`[Monitor ${sessionId}] Background extraction completed for "${title}": ${extractedCount}`);
+        }
+      };
+
+      runHistoricalExtraction().catch((e) => {
+        console.error(`[Monitor ${sessionId}] Background extraction error for ${account.phone}: ${e.message}`);
+      });
     } catch (clientErr) {
       console.error(`[Monitor ${sessionId}] Failed to connect account ${account.phone}: ${clientErr.message}`);
       monitor.errors.push(`فشل اتصال ${account.phone}: ${clientErr.message}`);
@@ -1343,6 +1354,7 @@ async function stopMonitor(sessionId) {
   if (!monitor) return false;
 
   console.log(`[Monitor ${sessionId}] Stopping...`);
+  monitor.stopRequested = true;
   
   for (const { client, phone } of monitor.clients) {
     try {
