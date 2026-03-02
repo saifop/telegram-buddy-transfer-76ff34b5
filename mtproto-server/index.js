@@ -1235,17 +1235,13 @@ async function handleStartMonitoring({ accounts, groups, sessionId, supabaseUrl,
 
       // === PHASE 2: Set up real-time message handler (only for monitored groups) ===
       const { NewMessage } = require('telegram/events');
-      const monitorChatIds = new Set([...monitor.resolvedChatIds]);
+      // Use GramJS built-in chats filter - pass entity objects directly
+      const chatEntities = resolvedEntities.map(r => r.entity);
       
       const handler = async (event) => {
         try {
           const message = event.message;
           if (!message || !message.senderId) return;
-          
-          // Filter: only process messages from monitored groups
-          const chatId = message.chatId || message.peerId?.channelId;
-          const chatIdStr = chatId?.value !== undefined ? chatId.value.toString() : chatId?.toString();
-          if (!chatIdStr || !monitorChatIds.has(chatIdStr)) return;
           
           const senderId = message.senderId.toString();
           
@@ -1292,9 +1288,9 @@ async function handleStartMonitoring({ accounts, groups, sessionId, supabaseUrl,
         }
       };
 
-      client.addEventHandler(handler, new NewMessage({}));
+      client.addEventHandler(handler, new NewMessage({ chats: chatEntities }));
       connectedClients.push({ client, phone: account.phone, handler, assignedGroups });
-      console.log(`[Monitor ${sessionId}] Account ${account.phone} connected and listening`);
+      console.log(`[Monitor ${sessionId}] Account ${account.phone} connected and listening to ${chatEntities.length} groups ONLY`);
     } catch (clientErr) {
       console.error(`[Monitor ${sessionId}] Failed to connect account ${account.phone}: ${clientErr.message}`);
       monitor.errors.push(`فشل اتصال ${account.phone}: ${clientErr.message}`);
