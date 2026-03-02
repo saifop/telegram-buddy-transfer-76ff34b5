@@ -362,6 +362,7 @@ export function useAddMembers({
           result.error?.includes("PEER_ID_INVALID") ||
           result.error?.includes("ADD_NOT_CONFIRMED") ||
           result.error?.includes("لم يتم تأكيد") ||
+          result.error?.includes("رفض صامت") ||
           result.error?.includes("USER_PRIVACY_RESTRICTED") ||
           result.error?.includes("خصوصية") ||
           result.error?.includes("USER_CHANNELS_TOO_MUCH") ||

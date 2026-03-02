@@ -887,19 +887,82 @@ async function handleAddMemberToGroup({ sessionString, groupLink, userId, userna
       })
     );
     
+    // ===== VERIFY the user was actually added =====
+    // Telegram can silently reject additions (no error thrown but user not added).
+    // We check the Updates result AND do a participant lookup to confirm.
+    const userIdStr = (userEntity.userId || userEntity.id || userId || '').toString();
+    let verified = false;
+    
+    // Method 1: Check if result.updates contains relevant user updates
+    if (result && result.updates && result.updates.length > 0) {
+      // If there are updates, it's a strong signal the action took effect
+      const hasUserUpdate = result.updates.some(u => 
+        u.className === 'UpdateChannel' || 
+        u.className === 'UpdateNewChannelMessage' ||
+        u.className === 'UpdateMessageID'
+      );
+      if (hasUserUpdate) {
+        console.log(`Updates indicate addition was processed for ${username || userId}`);
+        verified = true;
+      }
+    }
+    
+    // Method 2: Also check result.users to see if the target user is listed
+    if (!verified && result && result.users && result.users.length > 0) {
+      const addedUser = result.users.find(u => u.id && u.id.toString() === userIdStr);
+      if (addedUser) {
+        console.log(`User ${username || userId} found in InviteToChannel result.users`);
+        verified = true;
+      }
+    }
+    
+    // Method 3: Direct participant check - most reliable
+    if (!verified) {
+      try {
+        console.log(`Verifying membership for ${username || userId} in ${value}...`);
+        await new Promise(r => setTimeout(r, 2000)); // Wait 2s for Telegram to propagate
+        
+        const participant = await client.invoke(
+          new Api.channels.GetParticipant({
+            channel: channel,
+            participant: userEntity,
+          })
+        );
+        
+        if (participant && participant.participant) {
+          console.log(`✅ VERIFIED: ${username || userId} is now a participant`);
+          verified = true;
+        }
+      } catch (verifyErr) {
+        const vMsg = verifyErr.message || '';
+        if (vMsg.includes('USER_NOT_PARTICIPANT')) {
+          console.log(`❌ SILENT REJECTION: ${username || userId} was NOT actually added`);
+          verified = false;
+        } else {
+          // Other errors during verification - log but don't fail
+          console.log(`Verification check error: ${vMsg}, treating as unverified`);
+          verified = false;
+        }
+      }
+    }
+    
     await client.disconnect();
     
-    // ===== SUCCESS =====
-    // InviteToChannel completed without throwing an exception.
-    // Telegram throws specific errors (CHAT_ADMIN_REQUIRED, USER_PRIVACY_RESTRICTED, etc.)
-    // for actual failures. If we reach here, the API call was accepted.
-    console.log(`✅ InviteToChannel succeeded for ${username || userId} → ${value}`);
-    
-    return res.json({
-      success: true,
-      actuallyAdded: true,
-      message: `Added ${username || userId} to ${value}`,
-    });
+    if (verified) {
+      console.log(`✅ InviteToChannel VERIFIED for ${username || userId} → ${value}`);
+      return res.json({
+        success: true,
+        actuallyAdded: true,
+        verified: true,
+        message: `Added ${username || userId} to ${value}`,
+      });
+    } else {
+      console.log(`⚠️ InviteToChannel NOT VERIFIED for ${username || userId} → ${value}`);
+      return res.status(400).json({
+        error: `ADD_NOT_CONFIRMED: لم يتم تأكيد إضافة ${username || userId} - رفض صامت من تيليجرام`,
+        silentRejection: true,
+      });
+    }
 
   } catch (error) {
     if (client) {
