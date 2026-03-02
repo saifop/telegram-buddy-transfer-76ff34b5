@@ -888,14 +888,14 @@ async function handleAddMemberToGroup({ sessionString, groupLink, userId, userna
     );
     
     // ===== VERIFY the user was actually added =====
-    // Telegram can silently reject additions (no error thrown but user not added).
-    // We check the Updates result AND do a participant lookup to confirm.
+    // InviteToChannel completed without throwing → the API call was accepted by Telegram.
+    // We now try to confirm via multiple methods.
     const userIdStr = (userEntity.userId || userEntity.id || userId || '').toString();
     let verified = false;
+    let verificationSkipped = false;
     
-    // Method 1: Check if result.updates contains relevant user updates
+    // Method 1: Check result.updates for evidence the action took effect
     if (result && result.updates && result.updates.length > 0) {
-      // If there are updates, it's a strong signal the action took effect
       const hasUserUpdate = result.updates.some(u => 
         u.className === 'UpdateChannel' || 
         u.className === 'UpdateNewChannelMessage' ||
@@ -907,7 +907,7 @@ async function handleAddMemberToGroup({ sessionString, groupLink, userId, userna
       }
     }
     
-    // Method 2: Also check result.users to see if the target user is listed
+    // Method 2: Check result.users for the target user
     if (!verified && result && result.users && result.users.length > 0) {
       const addedUser = result.users.find(u => u.id && u.id.toString() === userIdStr);
       if (addedUser) {
@@ -916,11 +916,11 @@ async function handleAddMemberToGroup({ sessionString, groupLink, userId, userna
       }
     }
     
-    // Method 3: Direct participant check - most reliable
+    // Method 3: Direct participant check (only if Methods 1&2 didn't confirm)
     if (!verified) {
       try {
         console.log(`Verifying membership for ${username || userId} in ${value}...`);
-        await new Promise(r => setTimeout(r, 2000)); // Wait 2s for Telegram to propagate
+        await new Promise(r => setTimeout(r, 2000));
         
         const participant = await client.invoke(
           new Api.channels.GetParticipant({
@@ -938,10 +938,17 @@ async function handleAddMemberToGroup({ sessionString, groupLink, userId, userna
         if (vMsg.includes('USER_NOT_PARTICIPANT')) {
           console.log(`❌ SILENT REJECTION: ${username || userId} was NOT actually added`);
           verified = false;
+        } else if (vMsg.includes('CHAT_ADMIN_REQUIRED')) {
+          // Account is not admin → can't use GetParticipant to verify.
+          // Since InviteToChannel succeeded without error, trust it.
+          console.log(`⚠️ CHAT_ADMIN_REQUIRED during verify — trusting InviteToChannel result for ${username || userId}`);
+          verified = true;
+          verificationSkipped = true;
         } else {
-          // Other errors during verification - log but don't fail
-          console.log(`Verification check error: ${vMsg}, treating as unverified`);
-          verified = false;
+          // Unknown error during verification — trust InviteToChannel since it didn't throw
+          console.log(`Verification check error: ${vMsg}, trusting InviteToChannel result`);
+          verified = true;
+          verificationSkipped = true;
         }
       }
     }
@@ -949,15 +956,17 @@ async function handleAddMemberToGroup({ sessionString, groupLink, userId, userna
     await client.disconnect();
     
     if (verified) {
-      console.log(`✅ InviteToChannel VERIFIED for ${username || userId} → ${value}`);
+      const logPrefix = verificationSkipped ? '✅ InviteToChannel TRUSTED (no admin verify)' : '✅ InviteToChannel VERIFIED';
+      console.log(`${logPrefix} for ${username || userId} → ${value}`);
       return res.json({
         success: true,
         actuallyAdded: true,
-        verified: true,
+        verified: !verificationSkipped,
+        verificationSkipped: verificationSkipped || false,
         message: `Added ${username || userId} to ${value}`,
       });
     } else {
-      console.log(`⚠️ InviteToChannel NOT VERIFIED for ${username || userId} → ${value}`);
+      console.log(`⚠️ SILENT REJECTION CONFIRMED: ${username || userId} → ${value}`);
       return res.status(400).json({
         error: `ADD_NOT_CONFIRMED: لم يتم تأكيد إضافة ${username || userId} - رفض صامت من تيليجرام`,
         silentRejection: true,
