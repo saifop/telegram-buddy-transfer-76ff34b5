@@ -530,44 +530,65 @@ async function handleGetGroupMembers({ sessionString, groupLink, chatId, apiId, 
 
     let entity;
     if (chatId) {
-      // Use resolved chat ID directly (for private groups)
-      console.log(`Resolving entity by chatId: ${chatId}`);
-      const rawId = chatId.toString().replace('-100', '');
-      const attempts = [
-        () => client.getEntity(BigInt(rawId)),
-        () => client.getEntity(parseInt(rawId)),
-        () => client.getEntity(BigInt(`-100${rawId}`)),
-        () => client.getEntity(parseInt(`-100${rawId}`)),
-      ];
-      for (const attempt of attempts) {
-        try {
-          entity = await attempt();
-          if (entity) {
-            console.log(`Resolved entity: ${entity.title || entity.id}`);
-            break;
+      // Prefer resolving by groupLink first (more reliable for private groups)
+      if (groupLink) {
+        const { type, value } = parseGroupLink(groupLink);
+        if (value) {
+          try {
+            if (type === 'hash') {
+              try {
+                const joinResult = await client.invoke(new Api.messages.ImportChatInvite({ hash: value }));
+                if (joinResult?.chats?.length > 0) {
+                  entity = joinResult.chats[0];
+                  console.log(`Resolved by invite import: ${entity.title || entity.id}`);
+                }
+              } catch (e) {
+                const msg = e.message || '';
+                if (!msg.includes('USER_ALREADY_PARTICIPANT')) {
+                  console.log(`ImportChatInvite resolve failed: ${msg}`);
+                }
+              }
+
+              if (!entity) {
+                try {
+                  const checkResult = await client.invoke(new Api.messages.CheckChatInvite({ hash: value }));
+                  if (checkResult?.chat) {
+                    entity = checkResult.chat;
+                    console.log(`Resolved by CheckChatInvite: ${entity.title || entity.id}`);
+                  }
+                } catch (e) {
+                  console.log(`CheckChatInvite resolve failed: ${e.message}`);
+                }
+              }
+            } else {
+              entity = await client.getEntity(value);
+              if (entity) console.log(`Resolved by groupLink username: ${entity.title || entity.id}`);
+            }
+          } catch (e) {
+            console.log(`groupLink resolve failed: ${e.message}`);
           }
-        } catch (e) {
-          console.log(`Entity resolve attempt failed: ${e.message}`);
         }
       }
+
+      // Fallback: search dialogs using chatId
       if (!entity) {
-        // Last resort: search dialogs for a matching group
-        console.log('All getEntity attempts failed, searching dialogs...');
-        const dialogs = await client.getDialogs({ limit: 100 });
-        const targetId = rawId.toString();
+        const rawId = chatId.toString().replace('-100', '');
+        console.log(`Resolving entity by chatId via dialogs: ${chatId} (raw: ${rawId})`);
+        const dialogs = await client.getDialogs({ limit: 200 });
         for (const d of dialogs) {
           if (d.entity && (d.isChannel || d.isGroup)) {
             const dId = d.entity.id?.value !== undefined ? d.entity.id.value.toString() : d.entity.id?.toString();
-            if (dId === targetId) {
+            if (dId === rawId) {
               entity = d.entity;
-              console.log(`Found entity in dialogs: ${entity.title}`);
+              console.log(`Found entity in dialogs: ${entity.title || entity.id}`);
               break;
             }
           }
         }
-        if (!entity) {
-          return res.status(400).json({ error: 'تعذر العثور على المجموعة بمعرفها' });
-        }
+      }
+
+      if (!entity) {
+        return res.status(400).json({ error: 'تعذر العثور على المجموعة بمعرفها' });
       }
     } else {
       const { type, value } = parseGroupLink(groupLink);
