@@ -117,7 +117,7 @@ export function ExtractMembersDialog({
       // Step 0: Resolve chatId for private links
       let resolvedChatId: string | null = manualChatId.trim() || null;
       
-      if (isPrivateLink(sourceGroup) && !resolvedChatId) {
+      if (!resolvedChatId) {
         setExtractionStatus("جاري الانضمام للمجموعة الخاصة...");
         addLog("info", `رابط خاص، جاري الانضمام أولاً: ${sourceGroup}`);
         
@@ -251,8 +251,8 @@ export function ExtractMembersDialog({
         setExtractionStatus(`تم جلب ${allMembers.length} عضو... (${queryNum}/${totalQueries})`);
         setProgress(Math.round((queryNum / totalQueries) * 100));
 
-        // Small delay between queries
-        await new Promise(r => setTimeout(r, 500));
+        // Minimal delay between queries for speed
+        await new Promise(r => setTimeout(r, 150));
       }
 
       // Deduplicate and format - include ALL members (with and without username)

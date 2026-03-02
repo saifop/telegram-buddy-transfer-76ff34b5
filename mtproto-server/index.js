@@ -398,6 +398,16 @@ async function handleJoinGroup({ sessionString, groupLink, apiId, apiHash }, res
           channel: value,
         })
       );
+      // Resolve chatId for public groups too
+      try {
+        const ent = await client.getEntity(value);
+        if (ent) {
+          resolvedChatId = ent.id?.value !== undefined ? `-100${ent.id.value}` : (ent.id ? `-100${ent.id}` : null);
+          resolvedTitle = ent.title || null;
+        }
+      } catch (e) {
+        console.log(`Could not resolve public group entity: ${e.message}`);
+      }
     }
     
     await client.disconnect();
