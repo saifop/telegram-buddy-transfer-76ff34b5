@@ -27,12 +27,16 @@ app.use(express.json({ limit: '50mb' }));
 // Store active sessions in memory (use Redis for production)
 const activeSessions = new Map();
 
+// Store active monitoring sessions
+const activeMonitors = new Map(); // monitorId -> { clients, handlers, supabaseUrl, supabaseKey, sessionId }
+
 // Health check endpoint
 app.get('/', (req, res) => {
   res.json({ 
     status: 'ok', 
     message: 'Telegram MTProto Server is running',
-    version: '2.0.0'
+    version: '2.1.0',
+    activeMonitors: activeMonitors.size,
   });
 });
 
@@ -61,6 +65,12 @@ app.post('/auth', async (req, res) => {
         return await handleGetGroupMembers(params, res);
       case 'addMemberToGroup':
         return await handleAddMemberToGroup(params, res);
+      case 'startMonitoring':
+        return await handleStartMonitoring(params, res);
+      case 'stopMonitoring':
+        return await handleStopMonitoring(params, res);
+      case 'getMonitoringStatus':
+        return await handleGetMonitoringStatus(params, res);
       default:
         return res.status(400).json({ error: 'Invalid action' });
     }
@@ -1017,6 +1027,289 @@ async function handleAddMemberToGroup({ sessionString, groupLink, userId, userna
     
     return res.status(500).json({ error: `خطأ في الإضافة: ${errorMessage}` });
   }
+}
+
+/**
+ * Start monitoring groups for new messages
+ * Connects accounts to groups and listens for messages in real-time
+ */
+async function handleStartMonitoring({ accounts, groups, sessionId, supabaseUrl, supabaseKey }, res) {
+  if (!accounts || !accounts.length || !groups || !groups.length || !sessionId || !supabaseUrl || !supabaseKey) {
+    return res.status(400).json({ error: 'Missing required parameters: accounts, groups, sessionId, supabaseUrl, supabaseKey' });
+  }
+
+  // Stop existing monitor with same sessionId if any
+  if (activeMonitors.has(sessionId)) {
+    await stopMonitor(sessionId);
+  }
+
+  const monitor = {
+    clients: [],
+    sessionId,
+    supabaseUrl,
+    supabaseKey,
+    groups: groups,
+    startedAt: Date.now(),
+    membersFound: 0,
+    errors: [],
+  };
+
+  console.log(`[Monitor ${sessionId}] Starting monitoring for ${groups.length} groups with ${accounts.length} accounts`);
+
+  // Distribute groups across accounts
+  const connectedClients = [];
+  for (let i = 0; i < accounts.length; i++) {
+    const account = accounts[i];
+    try {
+      const client = await getClientFromSession(
+        account.sessionString, 
+        account.apiId || 123456, 
+        account.apiHash || 'demo'
+      );
+      
+      // Join assigned groups
+      const assignedGroups = [];
+      for (let g = 0; g < groups.length; g++) {
+        if (g % accounts.length === i) {
+          assignedGroups.push(groups[g]);
+        }
+      }
+
+      // Join each group
+      for (const groupLink of assignedGroups) {
+        try {
+          const { type, value } = parseGroupLink(groupLink);
+          if (type === 'hash') {
+            try {
+              await client.invoke(new Api.messages.ImportChatInvite({ hash: value }));
+            } catch (e) {
+              if (!e.message?.includes('USER_ALREADY_PARTICIPANT')) throw e;
+            }
+          } else {
+            try {
+              await client.invoke(new Api.channels.JoinChannel({ channel: value }));
+            } catch (e) {
+              if (!e.message?.includes('USER_ALREADY_PARTICIPANT')) throw e;
+            }
+          }
+          console.log(`[Monitor ${sessionId}] Account ${account.phone} joined ${groupLink}`);
+        } catch (joinErr) {
+          console.error(`[Monitor ${sessionId}] Failed to join ${groupLink}: ${joinErr.message}`);
+          monitor.errors.push(`فشل انضمام ${account.phone} لـ ${groupLink}: ${joinErr.message}`);
+        }
+      }
+
+      // Set up new message handler
+      const { NewMessage } = require('telegram/events');
+      const handler = async (event) => {
+        try {
+          const message = event.message;
+          if (!message || !message.senderId) return;
+          
+          const senderId = message.senderId.toString();
+          
+          // Get sender info
+          let senderUsername = null;
+          let senderFirstName = null;
+          let senderLastName = null;
+          let senderAccessHash = null;
+          let sourceGroup = null;
+          
+          try {
+            const sender = await message.getSender();
+            if (sender) {
+              senderUsername = sender.username || null;
+              senderFirstName = sender.firstName || null;
+              senderLastName = sender.lastName || null;
+              senderAccessHash = sender.accessHash ? sender.accessHash.toString() : null;
+            }
+          } catch (e) {
+            // Ignore sender fetch errors
+          }
+
+          // Get chat info for source group
+          try {
+            const chat = await message.getChat();
+            if (chat) {
+              sourceGroup = chat.title || chat.username || null;
+            }
+          } catch (e) {}
+
+          // Store in Supabase (upsert - ignore duplicates)
+          const memberData = {
+            session_id: sessionId,
+            telegram_user_id: senderId,
+            username: senderUsername,
+            first_name: senderFirstName,
+            last_name: senderLastName,
+            access_hash: senderAccessHash,
+            source_group: sourceGroup,
+            message_text: (message.text || '').substring(0, 200),
+          };
+
+          try {
+            const response = await fetch(`${supabaseUrl}/rest/v1/monitored_members`, {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                'apikey': supabaseKey,
+                'Authorization': `Bearer ${supabaseKey}`,
+                'Prefer': 'resolution=ignore-duplicates',
+              },
+              body: JSON.stringify(memberData),
+            });
+            
+            if (response.ok || response.status === 201 || response.status === 409) {
+              // Update count (only on 201)
+              if (response.status === 201 || response.ok) {
+                monitor.membersFound++;
+                // Update session count in Supabase
+                if (monitor.membersFound % 10 === 0) {
+                  fetch(`${supabaseUrl}/rest/v1/monitoring_sessions?id=eq.${sessionId}`, {
+                    method: 'PATCH',
+                    headers: {
+                      'Content-Type': 'application/json',
+                      'apikey': supabaseKey,
+                      'Authorization': `Bearer ${supabaseKey}`,
+                    },
+                    body: JSON.stringify({ total_members_found: monitor.membersFound }),
+                  }).catch(() => {});
+                }
+              }
+              console.log(`[Monitor ${sessionId}] New member: ${senderUsername || senderId} from ${sourceGroup}`);
+            }
+          } catch (dbErr) {
+            console.error(`[Monitor ${sessionId}] DB store error: ${dbErr.message}`);
+          }
+        } catch (handlerErr) {
+          console.error(`[Monitor ${sessionId}] Handler error: ${handlerErr.message}`);
+        }
+      };
+
+      client.addEventHandler(handler, new NewMessage({}));
+      connectedClients.push({ client, phone: account.phone, handler, assignedGroups });
+      console.log(`[Monitor ${sessionId}] Account ${account.phone} connected and listening`);
+    } catch (clientErr) {
+      console.error(`[Monitor ${sessionId}] Failed to connect account ${account.phone}: ${clientErr.message}`);
+      monitor.errors.push(`فشل اتصال ${account.phone}: ${clientErr.message}`);
+    }
+  }
+
+  if (connectedClients.length === 0) {
+    return res.status(400).json({ 
+      error: 'فشل اتصال جميع الحسابات',
+      errors: monitor.errors 
+    });
+  }
+
+  monitor.clients = connectedClients;
+  activeMonitors.set(sessionId, monitor);
+
+  // Update session status in Supabase
+  try {
+    await fetch(`${supabaseUrl}/rest/v1/monitoring_sessions?id=eq.${sessionId}`, {
+      method: 'PATCH',
+      headers: {
+        'Content-Type': 'application/json',
+        'apikey': supabaseKey,
+        'Authorization': `Bearer ${supabaseKey}`,
+      },
+      body: JSON.stringify({ status: 'running', started_at: new Date().toISOString() }),
+    });
+  } catch (e) {}
+
+  return res.json({
+    success: true,
+    connectedAccounts: connectedClients.length,
+    totalAccounts: accounts.length,
+    monitoringGroups: groups.length,
+    errors: monitor.errors,
+    message: `بدأت المراقبة بـ ${connectedClients.length} حساب على ${groups.length} مجموعة`,
+  });
+}
+
+/**
+ * Stop monitoring
+ */
+async function stopMonitor(sessionId) {
+  const monitor = activeMonitors.get(sessionId);
+  if (!monitor) return false;
+
+  console.log(`[Monitor ${sessionId}] Stopping...`);
+  
+  for (const { client, phone } of monitor.clients) {
+    try {
+      await client.disconnect();
+      console.log(`[Monitor ${sessionId}] Disconnected ${phone}`);
+    } catch (e) {}
+  }
+
+  // Update session status in Supabase
+  try {
+    await fetch(`${monitor.supabaseUrl}/rest/v1/monitoring_sessions?id=eq.${sessionId}`, {
+      method: 'PATCH',
+      headers: {
+        'Content-Type': 'application/json',
+        'apikey': monitor.supabaseKey,
+        'Authorization': `Bearer ${monitor.supabaseKey}`,
+      },
+      body: JSON.stringify({ 
+        status: 'stopped', 
+        stopped_at: new Date().toISOString(),
+        total_members_found: monitor.membersFound,
+      }),
+    });
+  } catch (e) {}
+
+  activeMonitors.delete(sessionId);
+  return true;
+}
+
+async function handleStopMonitoring({ sessionId }, res) {
+  if (!sessionId) {
+    return res.status(400).json({ error: 'Missing sessionId' });
+  }
+
+  const stopped = await stopMonitor(sessionId);
+  if (!stopped) {
+    return res.status(404).json({ error: 'لا توجد جلسة مراقبة نشطة بهذا المعرف' });
+  }
+
+  return res.json({ success: true, message: 'تم إيقاف المراقبة' });
+}
+
+/**
+ * Get monitoring status
+ */
+async function handleGetMonitoringStatus({ sessionId }, res) {
+  if (sessionId) {
+    const monitor = activeMonitors.get(sessionId);
+    if (!monitor) {
+      return res.json({ active: false, sessionId });
+    }
+    return res.json({
+      active: true,
+      sessionId,
+      connectedAccounts: monitor.clients.length,
+      groups: monitor.groups,
+      membersFound: monitor.membersFound,
+      uptime: Math.floor((Date.now() - monitor.startedAt) / 1000),
+      errors: monitor.errors,
+    });
+  }
+
+  // Return all active monitors
+  const monitors = [];
+  for (const [id, m] of activeMonitors) {
+    monitors.push({
+      sessionId: id,
+      connectedAccounts: m.clients.length,
+      groups: m.groups,
+      membersFound: m.membersFound,
+      uptime: Math.floor((Date.now() - m.startedAt) / 1000),
+    });
+  }
+  return res.json({ activeMonitors: monitors });
 }
 
 /**
