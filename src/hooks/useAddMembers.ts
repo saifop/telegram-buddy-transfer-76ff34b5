@@ -132,7 +132,7 @@ export function useAddMembers({
     } catch (err) {
       // Network error, keep polling
     }
-  }, [addLog, onUpdateProgress, onUpdateMemberStatus, onOperationEnd]);
+  }, [members, addLog, onUpdateProgress, onUpdateMemberStatus, onOperationEnd]);
 
   // Resume polling on mount if there's an active job
   useEffect(() => {
