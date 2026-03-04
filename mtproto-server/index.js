@@ -1573,6 +1573,285 @@ async function handleGetMonitoringStatus({ sessionId }, res) {
   return res.json({ activeMonitors: monitors });
 }
 
+// ========== BATCH ADD SYSTEM ==========
+
+/**
+ * Start a batch-add job that runs in background
+ */
+async function handleStartBatchAdd({ accounts, members, targetGroup, sourceGroup, settings, jobId }, res) {
+  if (!accounts || !accounts.length || !members || !members.length || !targetGroup) {
+    return res.status(400).json({ error: 'Missing required: accounts, members, targetGroup' });
+  }
+
+  const id = jobId || 'batch_' + Date.now().toString(36) + Math.random().toString(36).substr(2, 9);
+
+  // Stop existing job with same id
+  if (activeBatchJobs.has(id)) {
+    const old = activeBatchJobs.get(id);
+    old.stopRequested = true;
+    await new Promise(r => setTimeout(r, 500));
+    activeBatchJobs.delete(id);
+  }
+
+  const job = {
+    id,
+    accounts,
+    members: members.map(m => ({ ...m, status: 'pending', error: null })),
+    targetGroup,
+    sourceGroup: sourceGroup || '',
+    settings: {
+      delayMin: settings?.delayMin || 10,
+      delayMax: settings?.delayMax || 30,
+      maxRetries: settings?.maxRetries || 2,
+      cooldownAfterFlood: settings?.cooldownAfterFlood || 300,
+    },
+    startedAt: Date.now(),
+    stopRequested: false,
+    pauseRequested: false,
+    processed: 0,
+    total: members.length,
+    successCount: 0,
+    failedCount: 0,
+    skippedCount: 0,
+    currentMember: null,
+    currentAccount: null,
+    logs: [],
+    bannedAccounts: new Set(),
+    notAdminAccounts: new Set(),
+    accountFloodUntil: new Map(),
+    currentAccountIdx: 0,
+    status: 'running',
+  };
+
+  activeBatchJobs.set(id, job);
+  console.log(`[BatchAdd ${id}] Starting: ${members.length} members, ${accounts.length} accounts → ${targetGroup}`);
+
+  // Respond immediately
+  res.json({ success: true, jobId: id, message: `بدأت العملية: ${members.length} عضو` });
+
+  // Run in background
+  runBatchAddJob(job).catch(err => {
+    console.error(`[BatchAdd ${id}] Fatal: ${err.message}`);
+    job.status = 'stopped';
+    job.logs.push({ time: Date.now(), type: 'error', msg: `خطأ: ${err.message}` });
+  });
+}
+
+function addJobLog(job, type, msg, phone) {
+  job.logs.push({ time: Date.now(), type, msg, phone });
+  if (job.logs.length > 200) job.logs = job.logs.slice(-200);
+}
+
+async function runBatchAddJob(job) {
+  const { accounts, settings } = job;
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+  const getRandomDelay = () => Math.floor(Math.random() * (settings.delayMax - settings.delayMin + 1)) + settings.delayMin;
+
+  const getAvailableAccount = () => {
+    const now = Date.now();
+    for (let i = 0; i < accounts.length; i++) {
+      const idx = (job.currentAccountIdx + i) % accounts.length;
+      const acc = accounts[idx];
+      const accKey = acc.phone || idx.toString();
+      if (job.bannedAccounts.has(accKey)) continue;
+      if (job.notAdminAccounts.has(accKey)) continue;
+      const floodUntil = job.accountFloodUntil.get(accKey);
+      if (floodUntil && now < floodUntil) continue;
+      if (floodUntil && now >= floodUntil) job.accountFloodUntil.delete(accKey);
+      job.currentAccountIdx = (idx + 1) % accounts.length;
+      return acc;
+    }
+    return null;
+  };
+
+  // Pre-filter
+  const hasSourceGroup = !!job.sourceGroup.trim();
+  for (const m of job.members) {
+    const hasUsername = !!m.username?.trim();
+    const hasAccessHash = !!m.accessHash?.trim() && m.accessHash !== '0';
+    if (!hasUsername && !hasAccessHash && !hasSourceGroup) {
+      m.status = 'skipped';
+      m.error = 'لا يوجد username أو accessHash';
+      job.skippedCount++;
+      job.processed++;
+    }
+  }
+
+  const pendingMembers = job.members.filter(m => m.status === 'pending');
+  job.total = pendingMembers.length + job.processed;
+  addJobLog(job, 'info', `بدء إضافة ${pendingMembers.length} عضو بـ ${accounts.length} حساب`);
+
+  for (let i = 0; i < pendingMembers.length; i++) {
+    if (job.stopRequested) { job.status = 'stopped'; break; }
+    while (job.pauseRequested && !job.stopRequested) { job.status = 'paused'; await sleep(500); }
+    if (job.stopRequested) { job.status = 'stopped'; break; }
+    job.status = 'running';
+
+    const member = pendingMembers[i];
+    const memberLabel = member.username ? `@${member.username}` : (member.firstName || `ID:${member.userId}`);
+    job.currentMember = memberLabel;
+
+    let retries = 0;
+    let memberDone = false;
+
+    while (!memberDone && retries <= settings.maxRetries && !job.stopRequested) {
+      let account = getAvailableAccount();
+      if (!account) {
+        const now = Date.now();
+        let shortestWait = Infinity;
+        for (const [, until] of job.accountFloodUntil) { shortestWait = Math.min(shortestWait, until - now); }
+        if (shortestWait < Infinity && shortestWait > 0) {
+          addJobLog(job, 'info', `⏳ انتظار ${Math.ceil(shortestWait / 1000)}s`);
+          await sleep(shortestWait + 1000);
+          account = getAvailableAccount();
+        }
+        if (!account) {
+          member.status = 'failed'; member.error = 'لا يوجد حسابات'; job.failedCount++;
+          addJobLog(job, 'error', `لا يوجد حسابات لـ ${memberLabel}`);
+          memberDone = true; break;
+        }
+      }
+
+      const accKey = account.phone || job.currentAccountIdx.toString();
+      job.currentAccount = account.phone;
+      let client;
+
+      try {
+        client = await getClientFromSession(account.sessionString, account.apiId || 123456, account.apiHash || 'demo');
+        const { type, value } = parseGroupLink(job.targetGroup);
+        if (!value) { member.status = 'failed'; member.error = 'رابط غير صالح'; job.failedCount++; memberDone = true; try { await client.disconnect(); } catch(_){} break; }
+
+        let targetEntity;
+        try {
+          if (type === 'hash') {
+            try { const cr = await client.invoke(new Api.messages.CheckChatInvite({ hash: value })); if (cr?.chat) targetEntity = cr.chat; } catch(e) {}
+            if (!targetEntity) { try { const jr = await client.invoke(new Api.messages.ImportChatInvite({ hash: value })); if (jr?.chats?.length > 0) targetEntity = jr.chats[0]; } catch(e) {} }
+          } else { targetEntity = await client.getEntity(value); }
+        } catch(e) {}
+
+        if (!targetEntity) { try { await client.disconnect(); } catch(_){} retries++; addJobLog(job, 'warning', `فشل الوصول للمجموعة`, account.phone); continue; }
+
+        const isChat = targetEntity.className === 'Chat';
+
+        // Resolve user
+        let userEntity;
+        if (member.username?.trim()) {
+          try { const r = await client.invoke(new Api.contacts.ResolveUsername({ username: member.username.trim().replace('@', '') })); if (r?.users?.length > 0) userEntity = r.users[0]; } catch(e) {}
+        }
+        if (!userEntity && job.sourceGroup && member.userId) {
+          try {
+            const { type: sT, value: sV } = parseGroupLink(job.sourceGroup);
+            if (sV) {
+              let se; if (sT === 'hash') { try { const cr = await client.invoke(new Api.messages.CheckChatInvite({ hash: sV })); if (cr?.chat) se = cr.chat; } catch(e){} } else { se = await client.getEntity(sV); }
+              if (se) {
+                const p = await client.invoke(new Api.channels.GetParticipants({ channel: se, filter: new Api.ChannelParticipantsSearch({ q: '' }), offset: 0, limit: 200, hash: BigInt(0) }));
+                let f = p.users?.find(u => u.id?.toString() === member.userId.toString());
+                if (!f && member.username) { const p2 = await client.invoke(new Api.channels.GetParticipants({ channel: se, filter: new Api.ChannelParticipantsSearch({ q: member.username.substring(0, 5) }), offset: 0, limit: 200, hash: BigInt(0) })); f = p2.users?.find(u => u.id?.toString() === member.userId.toString()); }
+                if (f) userEntity = f;
+              }
+            }
+          } catch(e) {}
+        }
+        if (!userEntity && member.userId && member.accessHash && member.accessHash !== '0') {
+          try { userEntity = new Api.InputPeerUser({ userId: BigInt(member.userId), accessHash: BigInt(member.accessHash) }); } catch(e) {}
+        }
+
+        if (!userEntity) {
+          try { await client.disconnect(); } catch(_){}
+          member.status = 'skipped'; member.error = 'لا يمكن التعرف'; job.skippedCount++;
+          addJobLog(job, 'info', `⏭️ ${memberLabel}: لا يمكن التعرف`, account.phone);
+          memberDone = true; break;
+        }
+
+        let inputUser;
+        if (userEntity.className === 'User') { inputUser = new Api.InputUser({ userId: userEntity.id, accessHash: userEntity.accessHash || BigInt(0) }); }
+        else if (userEntity.className === 'InputPeerUser') { inputUser = new Api.InputUser({ userId: userEntity.userId, accessHash: userEntity.accessHash || BigInt(0) }); }
+        else { inputUser = userEntity; }
+
+        // Add with flood retry
+        let addOk = false;
+        for (let att = 0; att <= 3; att++) {
+          try {
+            if (isChat) { await client.invoke(new Api.messages.AddChatUser({ chatId: targetEntity.id, userId: inputUser, fwdLimit: 100 })); }
+            else { await client.invoke(new Api.channels.InviteToChannel({ channel: targetEntity, users: [inputUser] })); }
+            addOk = true; break;
+          } catch (err) {
+            const em = err.message || '';
+            if (em.includes('FLOOD_WAIT')) { const ws = parseInt((em.match(/(\d+)/)||['60'])[0]); if (att < 3) { addJobLog(job, 'warning', `FLOOD ${ws}s`, account.phone); await sleep((ws+1)*1000); continue; } else { job.accountFloodUntil.set(accKey, Date.now()+ws*1000); retries++; break; } }
+            if (em.includes('PEER_FLOOD')) { if (att < 3) { await sleep(30000*(att+1)); continue; } job.accountFloodUntil.set(accKey, Date.now()+60000); retries++; break; }
+            if (em.includes('USER_ALREADY_PARTICIPANT')) { member.status='skipped'; member.error='موجود مسبقاً'; job.skippedCount++; addJobLog(job,'info',`⏭️ ${memberLabel} موجود`); memberDone=true; break; }
+            if (em.includes('CHAT_ADMIN_REQUIRED')||em.includes('CHAT_WRITE_FORBIDDEN')) { job.notAdminAccounts.add(accKey); addJobLog(job,'error',`${account.phone} ليس مشرفاً`); retries++; break; }
+            if (em.includes('USER_PRIVACY')||em.includes('USER_NOT_MUTUAL')||em.includes('DEACTIVATED')||em.includes('USER_CHANNELS_TOO')||em.includes('USER_BANNED')||em.includes('USER_KICKED')||em.includes('USER_ID_INVALID')) {
+              member.status='skipped'; member.error=em.substring(0,40); job.skippedCount++; addJobLog(job,'info',`⏭️ ${memberLabel}: ${em.substring(0,40)}`); memberDone=true; break;
+            }
+            member.status='failed'; member.error=em.substring(0,50); job.failedCount++; addJobLog(job,'error',`❌ ${memberLabel}: ${em.substring(0,50)}`); memberDone=true; break;
+          }
+        }
+        if (addOk) { member.status='added'; job.successCount++; addJobLog(job,'success',`✅ ${memberLabel}`,account.phone); memberDone=true; }
+        try { await client.disconnect(); } catch(_){}
+
+      } catch (outerErr) {
+        if (client) { try { await client.disconnect(); } catch(_){} }
+        addJobLog(job, 'error', `خطأ: ${(outerErr.message||'').substring(0,50)}`, account.phone);
+        retries++;
+      }
+    }
+
+    if (!memberDone && !job.stopRequested) { member.status='failed'; member.error='استنفذت المحاولات'; job.failedCount++; }
+    job.processed++;
+
+    if (!job.stopRequested && i < pendingMembers.length - 1) {
+      const delay = getRandomDelay();
+      for (let d = 0; d < delay; d++) {
+        if (job.stopRequested) break;
+        while (job.pauseRequested && !job.stopRequested) await sleep(500);
+        await sleep(1000);
+      }
+    }
+  }
+
+  if (!job.stopRequested) job.status = 'completed';
+  job.currentMember = null; job.currentAccount = null;
+  addJobLog(job, 'success', `انتهت: ${job.successCount} نجاح، ${job.failedCount} فشل، ${job.skippedCount} تخطي`);
+  console.log(`[BatchAdd ${job.id}] Done: ${job.successCount}/${job.failedCount}/${job.skippedCount}`);
+  setTimeout(() => { activeBatchJobs.delete(job.id); }, 3600000);
+}
+
+async function handleStopBatchAdd({ jobId }, res) {
+  const job = activeBatchJobs.get(jobId);
+  if (!job) return res.json({ success: false, error: 'لا توجد عملية' });
+  job.stopRequested = true; job.pauseRequested = false; job.status = 'stopped';
+  return res.json({ success: true });
+}
+
+async function handlePauseBatchAdd({ jobId, pause }, res) {
+  const job = activeBatchJobs.get(jobId);
+  if (!job) return res.json({ success: false, error: 'لا توجد عملية' });
+  job.pauseRequested = !!pause;
+  if (!pause) job.status = 'running';
+  return res.json({ success: true, paused: !!pause });
+}
+
+async function handleGetBatchAddStatus({ jobId }, res) {
+  if (jobId) {
+    const job = activeBatchJobs.get(jobId);
+    if (!job) return res.json({ active: false, jobId });
+    return res.json({
+      active: job.status === 'running' || job.status === 'paused',
+      jobId: job.id, status: job.status,
+      processed: job.processed, total: job.total,
+      successCount: job.successCount, failedCount: job.failedCount, skippedCount: job.skippedCount,
+      currentMember: job.currentMember, currentAccount: job.currentAccount,
+      uptime: Math.floor((Date.now() - job.startedAt) / 1000),
+      logs: job.logs.slice(-50),
+      members: job.members.map(m => ({ userId: m.userId, username: m.username, status: m.status, error: m.error })),
+    });
+  }
+  const jobs = [];
+  for (const [id, j] of activeBatchJobs) { jobs.push({ jobId: id, status: j.status, processed: j.processed, total: j.total, successCount: j.successCount }); }
+  return res.json({ jobs });
+}
+
 /**
  * Generate a unique session ID
  */
