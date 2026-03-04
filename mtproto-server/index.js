@@ -1045,6 +1045,12 @@ async function handleAddMemberToGroup({ sessionString, groupLink, userId, userna
       return res.json({ success: false, error: 'معرف المستخدم غير صالح' });
     
     return res.json({ success: false, error: `خطأ في الإضافة: ${errorMessage}` });
+  } catch (outerError) {
+    // Catch any unexpected errors in the entire function
+    if (client) { try { await client.disconnect(); } catch (_) {} }
+    const msg = outerError.message || 'خطأ غير متوقع';
+    console.error(`[ADD] Outer error: ${msg}`);
+    return res.json({ success: false, error: `خطأ في الإضافة: ${msg}` });
   }
 }
 
