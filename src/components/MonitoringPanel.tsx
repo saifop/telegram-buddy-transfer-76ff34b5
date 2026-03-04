@@ -50,6 +50,7 @@ interface MonitoringSession {
 
 export function MonitoringPanel({ accounts }: MonitoringPanelProps) {
   const [groups, setGroups] = useState<string[]>([""]);
+  const [targetGroup, setTargetGroup] = useState("");
   const [selectedAccounts, setSelectedAccounts] = useState<Set<string>>(new Set());
   const [activeSession, setActiveSession] = useState<MonitoringSession | null>(null);
   const [members, setMembers] = useState<MonitoredMember[]>([]);
@@ -59,6 +60,10 @@ export function MonitoringPanel({ accounts }: MonitoringPanelProps) {
   const [liveStatus, setLiveStatus] = useState<{
     active: boolean;
     membersFound?: number;
+    membersAdded?: number;
+    membersFailed?: number;
+    addQueueSize?: number;
+    autoAddEnabled?: boolean;
     uptime?: number;
     connectedAccounts?: number;
   } | null>(null);
@@ -223,6 +228,7 @@ export function MonitoringPanel({ accounts }: MonitoringPanelProps) {
           sessionId: session.id,
           supabaseUrl,
           supabaseKey,
+          targetGroup: targetGroup.trim() || undefined,
         },
       });
 
@@ -349,6 +355,19 @@ export function MonitoringPanel({ accounts }: MonitoringPanelProps) {
                 <p className="font-semibold">
                   الأعضاء المكتشفين: {liveStatus?.membersFound ?? members.length}
                 </p>
+                {liveStatus?.autoAddEnabled && (
+                  <>
+                    <p className="text-green-500 font-semibold">
+                      ✅ تمت إضافتهم: {liveStatus.membersAdded || 0}
+                    </p>
+                    <p className="text-destructive">
+                      ❌ فشل إضافتهم: {liveStatus.membersFailed || 0}
+                    </p>
+                    <p className="text-muted-foreground">
+                      🔄 في الانتظار: {liveStatus.addQueueSize || 0}
+                    </p>
+                  </>
+                )}
               </div>
               <div className="flex gap-2">
                 {isRunning ? (
@@ -410,6 +429,19 @@ export function MonitoringPanel({ accounts }: MonitoringPanelProps) {
                   <Plus className="w-3 h-3 ml-1" />
                   إضافة مجموعة
                 </Button>
+              </div>
+
+              {/* Target Group */}
+              <div className="space-y-2">
+                <label className="text-xs font-medium text-muted-foreground">رابط المجموعة الهدف (إضافة تلقائية)</label>
+                <Input
+                  placeholder="رابط المجموعة الهدف لإضافة الأعضاء تلقائياً..."
+                  value={targetGroup}
+                  onChange={(e) => setTargetGroup(e.target.value)}
+                  className="text-xs h-8"
+                  dir="ltr"
+                />
+                <p className="text-[10px] text-muted-foreground">اختياري: كل عضو يُستخرج سيُضاف تلقائياً لهذه المجموعة</p>
               </div>
 
               {/* Accounts */}
