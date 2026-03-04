@@ -112,12 +112,11 @@ export function useAddMembers({
       // Sync member statuses
       if (data.members) {
         for (const m of data.members) {
-          if (m.status === 'added') {
-            onUpdateMemberStatus(m.userId, "added");
-          } else if (m.status === 'skipped') {
-            onUpdateMemberStatus(m.userId, "skipped", m.error);
-          } else if (m.status === 'failed') {
-            onUpdateMemberStatus(m.userId, "failed", m.error);
+          if (m.status === 'added' || m.status === 'skipped' || m.status === 'failed') {
+            const frontendMember = members.find(fm => fm.oderId === m.userId);
+            if (frontendMember) {
+              onUpdateMemberStatus(frontendMember.id, m.status as Member["status"], m.error || undefined);
+            }
           }
         }
       }
