@@ -1033,7 +1033,7 @@ async function handleAddMemberToGroup({ sessionString, groupLink, userId, userna
  * Start monitoring groups for new messages
  * Connects accounts to groups and listens for messages in real-time
  */
-async function handleStartMonitoring({ accounts, groups, sessionId, supabaseUrl, supabaseKey }, res) {
+async function handleStartMonitoring({ accounts, groups, sessionId, supabaseUrl, supabaseKey, targetGroup }, res) {
   if (!accounts || !accounts.length || !groups || !groups.length || !sessionId || !supabaseUrl || !supabaseKey) {
     return res.status(400).json({ error: 'Missing required parameters: accounts, groups, sessionId, supabaseUrl, supabaseKey' });
   }
@@ -1049,16 +1049,20 @@ async function handleStartMonitoring({ accounts, groups, sessionId, supabaseUrl,
     supabaseUrl,
     supabaseKey,
     groups: groups,
+    targetGroup: targetGroup || null,
     startedAt: Date.now(),
     membersFound: 0,
+    membersAdded: 0,
+    membersFailed: 0,
     errors: [],
-    resolvedChatIds: new Set(), // Store resolved chat IDs to filter messages
+    resolvedChatIds: new Set(),
     stopRequested: false,
+    addQueue: [],
   };
 
   console.log(`[Monitor ${sessionId}] Starting monitoring for ${groups.length} groups with ${accounts.length} accounts`);
 
-  // Helper: store member in Supabase
+  // Helper: store member in Supabase AND queue for auto-add
   const storeMember = async (memberData) => {
     try {
       const response = await fetch(`${supabaseUrl}/rest/v1/monitored_members`, {
@@ -1074,6 +1078,15 @@ async function handleStartMonitoring({ accounts, groups, sessionId, supabaseUrl,
       
       if (response.ok || response.status === 201) {
         monitor.membersFound++;
+        // Queue for auto-add if target group set
+        if (monitor.targetGroup && memberData.telegram_user_id) {
+          monitor.addQueue.push({
+            userId: memberData.telegram_user_id,
+            username: memberData.username,
+            accessHash: memberData.access_hash,
+            sourceGroup: memberData.source_group,
+          });
+        }
         if (monitor.membersFound % 50 === 0) {
           fetch(`${supabaseUrl}/rest/v1/monitoring_sessions?id=eq.${sessionId}`, {
             method: 'PATCH',
@@ -1091,6 +1104,70 @@ async function handleStartMonitoring({ accounts, groups, sessionId, supabaseUrl,
     } catch (e) {
       console.error(`[Monitor ${sessionId}] DB store error: ${e.message}`);
       return false;
+    }
+  };
+
+  // === Auto-add worker: processes queue and adds members to target group ===
+  const startAutoAddWorker = async (addClient) => {
+    console.log(`[Monitor ${sessionId}] Auto-add worker started for target: ${monitor.targetGroup}`);
+    const { type: tType, value: tValue } = parseGroupLink(monitor.targetGroup);
+    if (!tValue) { monitor.errors.push('رابط المجموعة الهدف غير صالح'); return; }
+
+    let targetEntity;
+    try {
+      if (tType === 'hash') {
+        try {
+          const jr = await addClient.invoke(new Api.messages.ImportChatInvite({ hash: tValue }));
+          if (jr?.chats?.length > 0) targetEntity = jr.chats[0];
+        } catch (e) { if (!e.message?.includes('USER_ALREADY_PARTICIPANT')) throw e; }
+        if (!targetEntity) {
+          const cr = await addClient.invoke(new Api.messages.CheckChatInvite({ hash: tValue }));
+          targetEntity = cr?.chat || null;
+        }
+      } else {
+        try { await addClient.invoke(new Api.channels.JoinChannel({ channel: tValue })); } catch (e) {}
+        targetEntity = await addClient.getEntity(tValue);
+      }
+    } catch (e) {
+      monitor.errors.push(`فشل الوصول للمجموعة الهدف: ${e.message}`);
+      return;
+    }
+    if (!targetEntity) { monitor.errors.push('تعذر تحديد المجموعة الهدف'); return; }
+    console.log(`[Monitor ${sessionId}] Target resolved: ${targetEntity.title || tValue}`);
+
+    const addedIds = new Set();
+    while (!monitor.stopRequested && activeMonitors.has(sessionId)) {
+      if (monitor.addQueue.length === 0) { await new Promise(r => setTimeout(r, 2000)); continue; }
+      const member = monitor.addQueue.shift();
+      if (!member || addedIds.has(member.userId)) continue;
+      addedIds.add(member.userId);
+
+      try {
+        let userEntity = null;
+        if (member.username) { try { userEntity = await addClient.getEntity(member.username); } catch (e) {} }
+        if (!userEntity && member.accessHash && member.accessHash !== '0') {
+          try { userEntity = new Api.InputPeerUser({ userId: BigInt(member.userId), accessHash: BigInt(member.accessHash) }); } catch (e) {}
+        }
+        if (!userEntity) { monitor.membersFailed++; continue; }
+
+        await addClient.invoke(new Api.channels.InviteToChannel({ channel: targetEntity, users: [userEntity] }));
+        monitor.membersAdded++;
+        console.log(`[Monitor ${sessionId}] ✅ Added ${member.username || member.userId} (total: ${monitor.membersAdded})`);
+        await new Promise(r => setTimeout(r, 5000)); // 5s cooldown
+      } catch (err) {
+        const msg = err.message || '';
+        if (msg.includes('USER_ALREADY_PARTICIPANT')) { /* skip */ }
+        else if (msg.includes('FLOOD_WAIT')) {
+          const ws = (msg.match(/FLOOD_WAIT[_\s]*(\d+)/i) || [])[1] || '60';
+          console.log(`[Monitor ${sessionId}] FLOOD_WAIT ${ws}s auto-add`);
+          monitor.addQueue.unshift(member); addedIds.delete(member.userId);
+          await new Promise(r => setTimeout(r, (parseInt(ws) + 1) * 1000));
+        } else if (msg.includes('CHAT_ADMIN_REQUIRED') || msg.includes('CHAT_WRITE_FORBIDDEN')) {
+          monitor.errors.push('الحساب ليس مشرفاً في المجموعة الهدف'); return;
+        } else if (msg.includes('USER_PRIVACY_RESTRICTED') || msg.includes('USER_NOT_MUTUAL_CONTACT') || msg.includes('INPUT_USER_DEACTIVATED') || msg.includes('USER_BANNED') || msg.includes('USER_KICKED')) {
+          monitor.membersFailed++;
+        } else { monitor.membersFailed++; console.log(`[Monitor ${sessionId}] Add err: ${msg}`); }
+      }
     }
   };
 
@@ -1329,6 +1406,19 @@ async function handleStartMonitoring({ accounts, groups, sessionId, supabaseUrl,
   monitor.clients = connectedClients;
   activeMonitors.set(sessionId, monitor);
 
+  // Start auto-add worker if target group is set
+  if (monitor.targetGroup && connectedClients.length > 0) {
+    const addAcc = accounts[0];
+    try {
+      const addClient = await getClientFromSession(addAcc.sessionString, addAcc.apiId || 123456, addAcc.apiHash || 'demo');
+      startAutoAddWorker(addClient).catch((e) => {
+        console.error(`[Monitor ${sessionId}] Auto-add worker crashed: ${e.message}`);
+      });
+    } catch (e) {
+      monitor.errors.push(`فشل تشغيل الإضافة التلقائية: ${e.message}`);
+    }
+  }
+
   // Update session status
   try {
     await fetch(`${supabaseUrl}/rest/v1/monitoring_sessions?id=eq.${sessionId}`, {
@@ -1351,9 +1441,9 @@ async function handleStartMonitoring({ accounts, groups, sessionId, supabaseUrl,
     connectedAccounts: connectedClients.length,
     totalAccounts: accounts.length,
     monitoringGroups: groups.length,
-    membersExtracted: monitor.membersFound,
+    autoAddEnabled: !!monitor.targetGroup,
     errors: monitor.errors,
-    message: `تم استخراج ${monitor.membersFound} عضو موجود وبدأت المراقبة بـ ${connectedClients.length} حساب`,
+    message: `تم بدء المراقبة بـ ${connectedClients.length} حساب${monitor.targetGroup ? ' مع الإضافة التلقائية' : ''}`,
   });
 }
 
@@ -1423,6 +1513,10 @@ async function handleGetMonitoringStatus({ sessionId }, res) {
       connectedAccounts: monitor.clients.length,
       groups: monitor.groups,
       membersFound: monitor.membersFound,
+      membersAdded: monitor.membersAdded || 0,
+      membersFailed: monitor.membersFailed || 0,
+      addQueueSize: monitor.addQueue?.length || 0,
+      autoAddEnabled: !!monitor.targetGroup,
       uptime: Math.floor((Date.now() - monitor.startedAt) / 1000),
       errors: monitor.errors,
     });
