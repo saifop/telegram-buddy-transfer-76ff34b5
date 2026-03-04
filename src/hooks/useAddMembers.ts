@@ -127,7 +127,7 @@ export function useAddMembers({
           action: "addMemberToGroup",
           sessionString: account.sessionString,
           groupLink: settings.targetGroup,
-          sourceGroup: settings.sourceGroup,
+          sourceGroup: settings.sourceGroup?.trim() || undefined,
           userId: member.oderId,
           username: member.username,
           accessHash: (member as any).accessHash || "",
