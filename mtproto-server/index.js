@@ -946,61 +946,87 @@ async function handleAddMemberToGroup({ sessionString, groupLink, userId, userna
     
     // ===== STEP 3: Add member (like Pyrogram's add_chat_members) =====
     let result;
-    if (isChat) {
-      console.log(`[ADD] Using AddChatUser (basic group)`);
-      result = await client.invoke(
-        new Api.messages.AddChatUser({
-          chatId: targetEntity.id,
-          userId: inputUser,
-          fwdLimit: 100,
-        })
-      );
-    } else {
-      console.log(`[ADD] Using InviteToChannel (supergroup/channel)`);
-      result = await client.invoke(
-        new Api.channels.InviteToChannel({
-          channel: targetEntity,
-          users: [inputUser],
-        })
-      );
-    }
+    // ===== STEP 3: Add member with retry on FLOOD_WAIT =====
+    const MAX_FLOOD_RETRIES = 3;
+    let lastError = null;
     
-    // ===== STEP 4: Check result =====
-    // Check missingInvitees (Telegram's explicit rejection)
-    if (result?.missingInvitees && result.missingInvitees.length > 0) {
-      const missing = result.missingInvitees[0];
-      await client.disconnect();
-      if (missing.premiumWouldAllowInvite) {
-        return res.json({ success: false, error: 'يتطلب حساب بريميوم للإضافة', premiumRequired: true });
+    for (let attempt = 0; attempt <= MAX_FLOOD_RETRIES; attempt++) {
+      try {
+        let result;
+        if (isChat) {
+          console.log(`[ADD] Using AddChatUser (basic group)${attempt > 0 ? ` retry #${attempt}` : ''}`);
+          result = await client.invoke(
+            new Api.messages.AddChatUser({
+              chatId: targetEntity.id,
+              userId: inputUser,
+              fwdLimit: 100,
+            })
+          );
+        } else {
+          console.log(`[ADD] Using InviteToChannel (supergroup/channel)${attempt > 0 ? ` retry #${attempt}` : ''}`);
+          result = await client.invoke(
+            new Api.channels.InviteToChannel({
+              channel: targetEntity,
+              users: [inputUser],
+            })
+          );
+        }
+        
+        // No error thrown = success (Pyrogram behavior - trust the API)
+        // Don't check missingInvitees - just trust InviteToChannel result
+        await client.disconnect();
+        console.log(`[ADD] ✅ Success: ${username || userId} → ${targetEntity.title}`);
+        return res.json({ success: true, message: `تمت إضافة ${username || userId}` });
+        
+      } catch (error) {
+        const errorMessage = error.message || '';
+        
+        // Handle FLOOD_WAIT on server side - sleep and retry
+        if (errorMessage.includes('FLOOD_WAIT')) {
+          const waitMatch = errorMessage.match(/FLOOD_WAIT[_\s]*(\d+)/i);
+          const waitSec = waitMatch ? parseInt(waitMatch[1]) : 60;
+          
+          if (attempt < MAX_FLOOD_RETRIES) {
+            console.log(`[ADD] FLOOD_WAIT ${waitSec}s - sleeping on server (attempt ${attempt + 1}/${MAX_FLOOD_RETRIES})...`);
+            await new Promise(r => setTimeout(r, (waitSec + 1) * 1000));
+            continue; // Retry after sleep
+          } else {
+            // Exhausted retries, return flood error to client
+            await client.disconnect();
+            return res.json({ success: false, error: `تم تجاوز الحد - انتظر ${waitSec} ثانية`, floodWait: waitSec });
+          }
+        }
+        
+        // For PEER_FLOOD (softer rate limit), also sleep and retry
+        if (errorMessage.includes('PEER_FLOOD')) {
+          if (attempt < MAX_FLOOD_RETRIES) {
+            const waitSec = 30 * (attempt + 1); // 30s, 60s, 90s
+            console.log(`[ADD] PEER_FLOOD - sleeping ${waitSec}s (attempt ${attempt + 1}/${MAX_FLOOD_RETRIES})...`);
+            await new Promise(r => setTimeout(r, waitSec * 1000));
+            continue;
+          } else {
+            await client.disconnect();
+            return res.json({ success: false, error: `تم تجاوز الحد - حاول لاحقاً`, floodWait: 60 });
+          }
+        }
+        
+        // Non-retryable errors - return immediately
+        lastError = errorMessage;
+        break;
       }
-      return res.json({ success: false, error: 'رفض صامت - تيليجرام لم يقبل الإضافة', silentRejection: true });
     }
     
-    // If no error was thrown and no missingInvitees, treat as success
-    // Wait briefly so backend only reports success after Telegram request is fully settled
-    await new Promise((r) => setTimeout(r, 1500));
-    await client.disconnect();
-    console.log(`[ADD] ✅ Success: ${username || userId} → ${targetEntity.title}`);
-    return res.json({ success: true, message: `تمت إضافة ${username || userId}` });
-    
-  } catch (error) {
+    // Handle non-retryable errors
     if (client) { try { await client.disconnect(); } catch (_) {} }
-    
-    const errorMessage = error.message || '';
+    const errorMessage = lastError || '';
     console.error(`[ADD] Error: ${errorMessage}`);
     
-    // Map errors to user-friendly responses
     if (errorMessage.includes('USER_PRIVACY_RESTRICTED'))
       return res.json({ success: false, error: 'خصوصية المستخدم تمنع الإضافة' });
     if (errorMessage.includes('USER_NOT_MUTUAL_CONTACT'))
       return res.json({ success: false, error: 'يجب أن يكون جهة اتصال متبادلة' });
     if (errorMessage.includes('USER_ALREADY_PARTICIPANT'))
       return res.json({ success: false, alreadyParticipant: true, error: 'العضو موجود مسبقاً' });
-    if (errorMessage.includes('PEER_FLOOD') || errorMessage.includes('FLOOD_WAIT')) {
-      const waitMatch = errorMessage.match(/FLOOD_WAIT[_\s]*(\d+)/i);
-      const waitSec = waitMatch ? parseInt(waitMatch[1]) : 60;
-      return res.json({ success: false, error: `تم تجاوز الحد - انتظر ${waitSec} ثانية`, floodWait: waitSec });
-    }
     if (errorMessage.includes('CHAT_ADMIN_REQUIRED') || errorMessage.includes('CHAT_WRITE_FORBIDDEN'))
       return res.json({ success: false, error: 'ليس لديك صلاحية الإضافة - يجب أن تكون مشرفاً', isNotAdmin: true });
     if (errorMessage.includes('USER_ID_INVALID') || errorMessage.includes('Could not find the input entity'))
