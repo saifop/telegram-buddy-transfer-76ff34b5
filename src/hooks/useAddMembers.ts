@@ -351,7 +351,6 @@ export function useAddMembers({
           addLog("success", `✅ تمت إضافة: ${memberLabel}`, account.phone);
           // Backend already returns only after the add request is fully completed
           memberDone = true;
-          memberDone = true;
         } else if (result.error?.includes("موجود مسبقاً")) {
           onUpdateMemberStatus(member.id, "skipped", "موجود مسبقاً");
           addLog("info", `⏭️ ${memberLabel} موجود مسبقاً`, account.phone);
