@@ -976,8 +976,9 @@ async function handleAddMemberToGroup({ sessionString, groupLink, userId, userna
       return res.json({ success: false, error: 'رفض صامت - تيليجرام لم يقبل الإضافة', silentRejection: true });
     }
     
-    // If no error was thrown and no missingInvitees, the add succeeded
-    // This is how Pyrogram works - trust the API response
+    // If no error was thrown and no missingInvitees, treat as success
+    // Wait briefly so backend only reports success after Telegram request is fully settled
+    await new Promise((r) => setTimeout(r, 1500));
     await client.disconnect();
     console.log(`[ADD] ✅ Success: ${username || userId} → ${targetEntity.title}`);
     return res.json({ success: true, message: `تمت إضافة ${username || userId}` });
