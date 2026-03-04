@@ -148,26 +148,64 @@ Deno.serve(async (req) => {
         const timeoutMs = longActions.includes(action) ? 300_000 : 30_000; // 5 min for long actions
         const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
-        const response = await fetch(serviceEndpoint, {
+        let response = await fetch(serviceEndpoint, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ action, ...normalizedParams }),
           signal: controller.signal,
         }).finally(() => clearTimeout(timeoutId));
 
+        // Retry logic for 502/503 errors (Railway max_conn / temporary overload)
+        const MAX_RETRIES = 3;
+        let lastResponse = response;
+        let rawText = await response.text();
+
+        if (response.status >= 502 && response.status <= 504) {
+          for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+            const backoff = 2000 * Math.pow(2, attempt - 1);
+            console.log(`Service returned ${lastResponse.status}, retrying in ${backoff}ms (attempt ${attempt}/${MAX_RETRIES})...`);
+            await new Promise(r => setTimeout(r, backoff));
+
+            try {
+              const retryController = new AbortController();
+              const retryTimeout = setTimeout(() => retryController.abort(), timeoutMs);
+              const retryResp = await fetch(serviceEndpoint, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ action, ...normalizedParams }),
+                signal: retryController.signal,
+              }).finally(() => clearTimeout(retryTimeout));
+
+              rawText = await retryResp.text();
+              lastResponse = retryResp;
+
+              if (retryResp.status < 502 || retryResp.status > 504) {
+                console.log(`Retry ${attempt} succeeded with status ${retryResp.status}`);
+                break;
+              }
+            } catch (retryErr) {
+              console.warn(`Retry ${attempt} failed:`, retryErr);
+              if (attempt === MAX_RETRIES) break;
+            }
+          }
+        }
+
         // Try to parse JSON; if service returns non-JSON, surface a clear error
-        const rawText = await response.text();
         let data: unknown = null;
         try {
           data = rawText ? JSON.parse(rawText) : null;
         } catch {
           const snippet = rawText?.slice(0, 500) || "(empty response body)";
-          console.error("External service returned non-JSON:", response.status, snippet);
+          console.error("External service returned non-JSON:", lastResponse.status, snippet);
           return errorResponse(
-            `Authentication service returned an invalid response (HTTP ${response.status}). Body: ${snippet}`,
+            `الخادم مشغول حالياً (خطأ ${lastResponse.status}). حاول مرة أخرى بعد قليل.`,
             502,
+            true,
           );
         }
+
+        // Use lastResponse for all subsequent status checks
+        response = lastResponse;
 
         if (!response.ok) {
           console.error("External service non-OK status:", response.status, data);
