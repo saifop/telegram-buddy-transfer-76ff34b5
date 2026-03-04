@@ -948,17 +948,62 @@ async function handleAddMemberToGroup({ sessionString, groupLink, userId, userna
         if (vMsg.includes('USER_NOT_PARTICIPANT')) {
           console.log(`❌ SILENT REJECTION: ${username || userId} was NOT actually added`);
           verified = false;
-        } else if (vMsg.includes('CHAT_ADMIN_REQUIRED')) {
-          // Account is not admin → can't use GetParticipant to verify.
-          // Since InviteToChannel succeeded without error, trust it.
-          console.log(`⚠️ CHAT_ADMIN_REQUIRED during verify — trusting InviteToChannel result for ${username || userId}`);
-          verified = true;
-          verificationSkipped = true;
+        } else if (vMsg.includes('CHAT_ADMIN_REQUIRED') || vMsg.includes('CHAT_WRITE_FORBIDDEN')) {
+          // Account is not admin → can't use GetParticipant.
+          // Use search-based verification instead of blindly trusting.
+          console.log(`⚠️ CHAT_ADMIN_REQUIRED — trying search-based verification for ${username || userId}`);
+          verified = false;
+          verificationSkipped = false;
+          
+          try {
+            // Method 4: Search for user in channel participants (doesn't require admin)
+            const searchQuery = username && username.trim() ? username.trim().substring(0, 10) : '';
+            if (searchQuery) {
+              await new Promise(r => setTimeout(r, 1500));
+              const searchResult = await client.invoke(
+                new Api.channels.GetParticipants({
+                  channel: channel,
+                  filter: new Api.ChannelParticipantsSearch({ q: searchQuery }),
+                  offset: 0,
+                  limit: 100,
+                  hash: BigInt(0),
+                })
+              );
+              
+              const foundUser = searchResult.users && searchResult.users.find(
+                u => u.id && u.id.toString() === userIdStr
+              );
+              
+              if (foundUser) {
+                console.log(`✅ SEARCH VERIFIED: ${username || userId} found in channel via search`);
+                verified = true;
+              } else {
+                console.log(`❌ SEARCH VERIFY FAILED: ${username || userId} NOT found in channel via search`);
+                verified = false;
+              }
+            } else {
+              // No username to search with - check if result had any positive signals
+              // Only trust if result.updates had actual channel updates
+              const hasStrongSignal = result && result.updates && result.updates.some(u =>
+                u.className === 'UpdateNewChannelMessage'
+              );
+              if (hasStrongSignal) {
+                console.log(`⚠️ No username for search, but strong update signals found — trusting for ${userId}`);
+                verified = true;
+                verificationSkipped = true;
+              } else {
+                console.log(`❌ No username for search and no strong signals — marking as unverified for ${userId}`);
+                verified = false;
+              }
+            }
+          } catch (searchErr) {
+            console.log(`Search verification failed: ${searchErr.message} — NOT trusting result for ${username || userId}`);
+            verified = false;
+          }
         } else {
-          // Unknown error during verification — trust InviteToChannel since it didn't throw
-          console.log(`Verification check error: ${vMsg}, trusting InviteToChannel result`);
-          verified = true;
-          verificationSkipped = true;
+          // Unknown error during verification — do NOT trust blindly
+          console.log(`Verification check error: ${vMsg}, NOT trusting result for ${username || userId}`);
+          verified = false;
         }
       }
     }
