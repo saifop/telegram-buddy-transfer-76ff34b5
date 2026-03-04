@@ -127,7 +127,7 @@ export function useAddMembers({
           action: "addMemberToGroup",
           sessionString: account.sessionString,
           groupLink: settings.targetGroup,
-          sourceGroup: settings.sourceGroup,
+          sourceGroup: settings.sourceGroup?.trim() || undefined,
           userId: member.oderId,
           username: member.username,
           accessHash: (member as any).accessHash || "",
@@ -349,9 +349,7 @@ export function useAddMembers({
           onUpdateMemberStatus(member.id, "added");
           successCount++;
           addLog("success", `✅ تمت إضافة: ${memberLabel}`, account.phone);
-          // Wait 5s for Telegram to confirm the addition before rotating
-          addLog("info", `⏳ انتظار 5 ثوانٍ للتأكيد...`, account.phone);
-          await sleep(5000);
+          // Backend already returns only after the add request is fully completed
           memberDone = true;
         } else if (result.error?.includes("موجود مسبقاً")) {
           onUpdateMemberStatus(member.id, "skipped", "موجود مسبقاً");

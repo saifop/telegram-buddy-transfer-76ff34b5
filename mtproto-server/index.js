@@ -808,28 +808,21 @@ async function handleAddMemberToGroup({ sessionString, groupLink, userId, userna
     let targetEntity;
     try {
       if (type === 'hash') {
-        // Private group - try CheckChatInvite first (doesn't re-join)
+        // Private group - resolve strictly by invite hash only (no random dialog fallback)
         try {
           const checkResult = await client.invoke(new Api.messages.CheckChatInvite({ hash: value }));
           if (checkResult?.chat) {
             targetEntity = checkResult.chat;
           }
         } catch (e) {
-          // If check fails, try import (will auto-join if not member)
           try {
             const joinResult = await client.invoke(new Api.messages.ImportChatInvite({ hash: value }));
-            if (joinResult?.chats?.length > 0) targetEntity = joinResult.chats[0];
-          } catch (je) {
-            if (je.message?.includes('USER_ALREADY_PARTICIPANT')) {
-              // Already joined, try getting from dialogs
-              const dialogs = await client.getDialogs({ limit: 100 });
-              for (const d of dialogs) {
-                if (d.entity && d.entity.title) {
-                  targetEntity = d.entity;
-                  // We can't be sure which one, but CheckChatInvite failed so this is best effort
-                }
-              }
+            if (joinResult?.chats?.length > 0) {
+              targetEntity = joinResult.chats[0];
             }
+          } catch (je) {
+            const joinMsg = je.message || '';
+            console.log(`[ADD] Invite hash resolve/import failed: ${joinMsg}`);
           }
         }
       } else {
@@ -983,8 +976,9 @@ async function handleAddMemberToGroup({ sessionString, groupLink, userId, userna
       return res.json({ success: false, error: 'رفض صامت - تيليجرام لم يقبل الإضافة', silentRejection: true });
     }
     
-    // If no error was thrown and no missingInvitees, the add succeeded
-    // This is how Pyrogram works - trust the API response
+    // If no error was thrown and no missingInvitees, treat as success
+    // Wait briefly so backend only reports success after Telegram request is fully settled
+    await new Promise((r) => setTimeout(r, 1500));
     await client.disconnect();
     console.log(`[ADD] ✅ Success: ${username || userId} → ${targetEntity.title}`);
     return res.json({ success: true, message: `تمت إضافة ${username || userId}` });
