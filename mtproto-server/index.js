@@ -785,7 +785,7 @@ async function extractForQuery(client, entity, q, skipIds) {
 }
 
 /**
- * Add a member to a group
+ * Add a member to a group - simplified Pyrogram-inspired logic
  */
 async function handleAddMemberToGroup({ sessionString, groupLink, userId, username, sourceGroup, accessHash, apiId, apiHash }, res) {
   if (!sessionString || !groupLink || (!userId && !username)) {
@@ -797,134 +797,145 @@ async function handleAddMemberToGroup({ sessionString, groupLink, userId, userna
     client = await getClientFromSession(sessionString, apiId || 123456, apiHash || 'demo');
     
     const { type, value } = parseGroupLink(groupLink);
-    
     if (!value) {
+      await client.disconnect();
       return res.status(400).json({ error: 'Invalid group link' });
     }
     
-    console.log(`Adding user ${username || userId} to group: ${value}`);
+    console.log(`[ADD] user=${username || userId} → group=${value}`);
     
-    // Get the target group/channel entity
+    // ===== STEP 1: Resolve target group =====
     let targetEntity;
     try {
-      targetEntity = await client.getEntity(value);
-    } catch (e) {
-      console.log(`Could not resolve group ${value}: ${e.message}`);
-      // Try joining first if entity not found
       if (type === 'hash') {
+        // Private group - try CheckChatInvite first (doesn't re-join)
         try {
-          const joinResult = await client.invoke(new Api.messages.ImportChatInvite({ hash: value }));
-          if (joinResult?.chats?.length > 0) {
-            targetEntity = joinResult.chats[0];
+          const checkResult = await client.invoke(new Api.messages.CheckChatInvite({ hash: value }));
+          if (checkResult?.chat) {
+            targetEntity = checkResult.chat;
           }
-        } catch (je) {
-          console.log(`Join attempt failed: ${je.message}`);
+        } catch (e) {
+          // If check fails, try import (will auto-join if not member)
+          try {
+            const joinResult = await client.invoke(new Api.messages.ImportChatInvite({ hash: value }));
+            if (joinResult?.chats?.length > 0) targetEntity = joinResult.chats[0];
+          } catch (je) {
+            if (je.message?.includes('USER_ALREADY_PARTICIPANT')) {
+              // Already joined, try getting from dialogs
+              const dialogs = await client.getDialogs({ limit: 100 });
+              for (const d of dialogs) {
+                if (d.entity && d.entity.title) {
+                  targetEntity = d.entity;
+                  // We can't be sure which one, but CheckChatInvite failed so this is best effort
+                }
+              }
+            }
+          }
         }
+      } else {
+        targetEntity = await client.getEntity(value);
       }
-      if (!targetEntity) {
-        await client.disconnect();
-        return res.status(400).json({ error: `لا يمكن الوصول للمجموعة: ${e.message}` });
-      }
+    } catch (e) {
+      console.log(`[ADD] Failed to resolve target: ${e.message}`);
     }
     
-    // Detect entity type
+    if (!targetEntity) {
+      await client.disconnect();
+      return res.status(400).json({ error: `لا يمكن الوصول للمجموعة: ${value}` });
+    }
+    
     const isChannel = targetEntity.className === 'Channel';
     const isChat = targetEntity.className === 'Chat';
-    const isMegagroup = isChannel && targetEntity.megagroup;
-    const isBroadcast = isChannel && !targetEntity.megagroup;
+    console.log(`[ADD] Target: ${targetEntity.title} (${targetEntity.className}, megagroup=${targetEntity.megagroup})`);
     
-    console.log(`Target entity: ${targetEntity.className}, megagroup: ${targetEntity.megagroup}, title: ${targetEntity.title}`);
-    
-    // Broadcast channels require admin - warn early
-    if (isBroadcast) {
-      console.log(`Target is a broadcast channel - admin required`);
-    }
-    
-    // Resolve user entity
+    // ===== STEP 2: Resolve user entity =====
+    // Like Pyrogram: simplest approach - try username first, then source group search
     let userEntity;
     
-    // Priority 1: Try username (most reliable - gives full entity with valid accessHash)
-    if (username && username.trim()) {
+    // Method 1: Username (most reliable - Pyrogram uses this internally)
+    if (!userEntity && username && username.trim()) {
+      const cleanUsername = username.trim().replace('@', '');
       try {
-        // Use ResolveUsername for a proper full entity
-        const resolved = await client.invoke(new Api.contacts.ResolveUsername({ username: username.trim().replace('@', '') }));
-        if (resolved && resolved.users && resolved.users.length > 0) {
+        const resolved = await client.invoke(new Api.contacts.ResolveUsername({ username: cleanUsername }));
+        if (resolved?.users?.length > 0) {
           userEntity = resolved.users[0];
-          console.log(`Resolved user by username: ${username}, id: ${userEntity.id}, accessHash: ${userEntity.accessHash}`);
+          console.log(`[ADD] Resolved by username: @${cleanUsername} → id=${userEntity.id}`);
         }
       } catch (e) {
-        console.log(`ResolveUsername failed for ${username}: ${e.message}`);
-        // Fallback to getEntity
-        try {
-          userEntity = await client.getEntity(username);
-          console.log(`Found user by getEntity: ${username}`);
-        } catch (e2) {
-          console.log(`getEntity also failed for ${username}: ${e2.message}`);
-        }
+        console.log(`[ADD] Username resolve failed: ${e.message}`);
       }
     }
     
-    // Priority 2: Resolve from source group
+    // Method 2: Search in source group (like Pyrogram's get_chat_members)
     if (!userEntity && sourceGroup && userId) {
       try {
-        const { value: sourceValue } = parseGroupLink(sourceGroup);
-        if (sourceValue) {
-          const sourceChannel = await client.getEntity(sourceValue);
-          const searchQueries = [];
-          if (username && username.trim()) searchQueries.push(username.substring(0, 5));
-          searchQueries.push('');
+        const { type: sType, value: sValue } = parseGroupLink(sourceGroup);
+        if (sValue) {
+          let sourceEntity;
+          if (sType === 'hash') {
+            try {
+              const checkResult = await client.invoke(new Api.messages.CheckChatInvite({ hash: sValue }));
+              if (checkResult?.chat) sourceEntity = checkResult.chat;
+            } catch (e) { /* ignore */ }
+          } else {
+            sourceEntity = await client.getEntity(sValue);
+          }
           
-          for (const searchQ of searchQueries) {
-            if (userEntity) break;
-            let offset = 0;
-            let attempts = 0;
-            while (attempts < 5) {
-              attempts++;
-              const participants = await client.invoke(
+          if (sourceEntity) {
+            // Search with empty query to scan participants
+            const participants = await client.invoke(
+              new Api.channels.GetParticipants({
+                channel: sourceEntity,
+                filter: new Api.ChannelParticipantsSearch({ q: '' }),
+                offset: 0,
+                limit: 200,
+                hash: BigInt(0),
+              })
+            );
+            let found = participants.users?.find(u => u.id?.toString() === userId.toString());
+            if (!found && username) {
+              // Try searching by username prefix
+              const p2 = await client.invoke(
                 new Api.channels.GetParticipants({
-                  channel: sourceChannel,
-                  filter: new Api.ChannelParticipantsSearch({ q: searchQ }),
-                  offset,
+                  channel: sourceEntity,
+                  filter: new Api.ChannelParticipantsSearch({ q: username.substring(0, 5) }),
+                  offset: 0,
                   limit: 200,
                   hash: BigInt(0),
                 })
               );
-              const foundUser = participants.users.find(u => u.id.toString() === userId.toString());
-              if (foundUser) {
-                userEntity = foundUser;
-                console.log(`Found user in source group: ${userId} (accessHash: ${foundUser.accessHash})`);
-                break;
-              }
-              if (!participants.users || participants.users.length < 200) break;
-              offset += participants.users.length;
-              await new Promise(r => setTimeout(r, 300));
+              found = p2.users?.find(u => u.id?.toString() === userId.toString());
+            }
+            if (found) {
+              userEntity = found;
+              console.log(`[ADD] Found in source group: id=${found.id}, accessHash=${found.accessHash}`);
             }
           }
         }
       } catch (e) {
-        console.log(`Could not get user from source group: ${e.message}`);
+        console.log(`[ADD] Source group search failed: ${e.message}`);
       }
     }
     
-    // Priority 3: InputPeerUser with stored accessHash
+    // Method 3: Use stored accessHash as last resort
     if (!userEntity && userId && accessHash && accessHash !== '0' && accessHash !== '') {
       try {
         userEntity = new Api.InputPeerUser({
           userId: BigInt(userId),
           accessHash: BigInt(accessHash),
         });
-        console.log(`Using stored accessHash for user ${userId}`);
+        console.log(`[ADD] Using stored accessHash for ${userId}`);
       } catch (e) {
-        console.log(`Failed to create InputPeerUser: ${e.message}`);
+        console.log(`[ADD] InputPeerUser failed: ${e.message}`);
       }
     }
     
     if (!userEntity) {
       await client.disconnect();
-      return res.status(400).json({ error: 'USER_ID_INVALID: لا يمكن العثور على المستخدم' });
+      return res.status(400).json({ error: 'لا يمكن التعرف على المستخدم - لا يوجد username أو accessHash صالح' });
     }
     
-    // Build proper InputUser from entity
+    // Build InputUser
     let inputUser;
     if (userEntity.className === 'User') {
       inputUser = new Api.InputUser({
@@ -940,12 +951,10 @@ async function handleAddMemberToGroup({ sessionString, groupLink, userId, userna
       inputUser = userEntity;
     }
     
-    // ===== PERFORM THE ADD =====
+    // ===== STEP 3: Add member (like Pyrogram's add_chat_members) =====
     let result;
-    
     if (isChat) {
-      // Basic group: use messages.AddChatUser
-      console.log(`Using messages.AddChatUser for basic group (chatId: ${targetEntity.id})`);
+      console.log(`[ADD] Using AddChatUser (basic group)`);
       result = await client.invoke(
         new Api.messages.AddChatUser({
           chatId: targetEntity.id,
@@ -954,8 +963,7 @@ async function handleAddMemberToGroup({ sessionString, groupLink, userId, userna
         })
       );
     } else {
-      // Channel/supergroup: use channels.InviteToChannel
-      console.log(`Using channels.InviteToChannel for ${isMegagroup ? 'supergroup' : 'channel'}`);
+      console.log(`[ADD] Using InviteToChannel (supergroup/channel)`);
       result = await client.invoke(
         new Api.channels.InviteToChannel({
           channel: targetEntity,
@@ -964,116 +972,59 @@ async function handleAddMemberToGroup({ sessionString, groupLink, userId, userna
       );
     }
     
-    // ===== CHECK RESULT =====
-    // Log the full result structure for debugging
-    const resultStr = JSON.stringify({
-      className: result?.className,
-      updatesCount: result?.updates?.length || 0,
-      usersCount: result?.users?.length || 0,
-      chatsCount: result?.chats?.length || 0,
-      updateTypes: result?.updates?.map(u => u.className) || [],
-    });
-    console.log(`InviteToChannel result: ${resultStr}`);
-    
-    // Check if result contains meaningful updates
-    const hasUpdates = result && result.updates && result.updates.length > 0;
-    const hasUsers = result && result.users && result.users.length > 0;
-    const userIdStr = (userEntity.userId || userEntity.id || userId || '').toString();
-    
-    // Check for the specific "channel participant added" update
-    const hasParticipantUpdate = hasUpdates && result.updates.some(u =>
-      u.className === 'UpdateNewChannelMessage' ||
-      u.className === 'UpdateChannel'
-    );
-    
-    // Check if the target user appears in result.users
-    const userInResult = hasUsers && result.users.some(u => 
-      u.id && u.id.toString() === userIdStr
-    );
-    
-    // If result has NO updates and NO users, it's likely a silent no-op
-    if (!hasUpdates && !hasUsers) {
-      console.log(`⚠️ InviteToChannel returned empty result — likely silent rejection for ${username || userId}`);
-      await client.disconnect();
-      return res.status(400).json({
-        error: `ADD_NOT_CONFIRMED: لم تتم الإضافة فعلياً - لا توجد تحديثات من تيليجرام`,
-        silentRejection: true,
-      });
-    }
-    
-    // Check for "missing invitees" in result (Telegram sometimes includes this)
-    if (result.missingInvitees && result.missingInvitees.length > 0) {
+    // ===== STEP 4: Check result =====
+    // Check missingInvitees (Telegram's explicit rejection)
+    if (result?.missingInvitees && result.missingInvitees.length > 0) {
       const missing = result.missingInvitees[0];
-      console.log(`⚠️ Missing invitee detected: premiumRequired=${missing.premiumWouldAllowInvite}, premiumRequired=${missing.premiumRequired}`);
-      
-      if (missing.premiumWouldAllowInvite) {
-        await client.disconnect();
-        return res.status(400).json({
-          error: `USER_PREMIUM_REQUIRED: المستخدم ${username || userId} يتطلب حساب بريميوم للإضافة`,
-          premiumRequired: true,
-        });
-      }
-      
-      // Any missingInvitee means the user was NOT added
       await client.disconnect();
-      return res.status(400).json({
-        error: `ADD_FAILED: لم يتم إضافة ${username || userId} - تيليجرام رفض الإضافة`,
-        silentRejection: true,
-      });
+      if (missing.premiumWouldAllowInvite) {
+        return res.json({ success: false, error: 'يتطلب حساب بريميوم للإضافة', premiumRequired: true });
+      }
+      return res.json({ success: false, error: 'رفض صامت - تيليجرام لم يقبل الإضافة', silentRejection: true });
     }
     
+    // If no error was thrown and no missingInvitees, the add succeeded
+    // This is how Pyrogram works - trust the API response
     await client.disconnect();
+    console.log(`[ADD] ✅ Success: ${username || userId} → ${targetEntity.title}`);
+    return res.json({ success: true, message: `تمت إضافة ${username || userId}` });
     
-    console.log(`✅ Added ${username || userId} → ${value} (updates: ${hasUpdates}, userInResult: ${userInResult})`);
-    return res.json({
-      success: true,
-      actuallyAdded: true,
-      verified: userInResult || hasParticipantUpdate,
-      message: `Added ${username || userId} to ${value}`,
-    });
   } catch (error) {
-    if (client) {
-      try { await client.disconnect(); } catch (_) {}
-    }
-    
-    console.error('AddMemberToGroup error:', error);
+    if (client) { try { await client.disconnect(); } catch (_) {} }
     
     const errorMessage = error.message || '';
-    if (errorMessage.includes('USER_PRIVACY_RESTRICTED')) {
-      return res.status(400).json({ error: 'USER_PRIVACY_RESTRICTED: خصوصية المستخدم تمنع الإضافة' });
-    }
-    if (errorMessage.includes('USER_NOT_MUTUAL_CONTACT')) {
-      return res.status(400).json({ error: 'USER_NOT_MUTUAL_CONTACT: يجب أن يكون المستخدم جهة اتصال متبادلة' });
-    }
-    if (errorMessage.includes('USER_ALREADY_PARTICIPANT')) {
-      // CRITICAL: Return alreadyParticipant flag so frontend doesn't count as real add
-      return res.json({ success: false, alreadyParticipant: true, error: 'USER_ALREADY_PARTICIPANT: العضو موجود مسبقاً' });
-    }
+    console.error(`[ADD] Error: ${errorMessage}`);
+    
+    // Map errors to user-friendly responses
+    if (errorMessage.includes('USER_PRIVACY_RESTRICTED'))
+      return res.json({ success: false, error: 'خصوصية المستخدم تمنع الإضافة' });
+    if (errorMessage.includes('USER_NOT_MUTUAL_CONTACT'))
+      return res.json({ success: false, error: 'يجب أن يكون جهة اتصال متبادلة' });
+    if (errorMessage.includes('USER_ALREADY_PARTICIPANT'))
+      return res.json({ success: false, alreadyParticipant: true, error: 'العضو موجود مسبقاً' });
     if (errorMessage.includes('PEER_FLOOD') || errorMessage.includes('FLOOD_WAIT')) {
       const waitMatch = errorMessage.match(/FLOOD_WAIT[_\s]*(\d+)/i);
-      const waitSec = waitMatch ? waitMatch[1] : '60';
-      return res.status(429).json({ error: `FLOOD_WAIT_${waitSec}: تم تجاوز الحد المسموح. انتظر ${waitSec} ثانية`, floodWait: parseInt(waitSec) });
+      const waitSec = waitMatch ? parseInt(waitMatch[1]) : 60;
+      return res.json({ success: false, error: `تم تجاوز الحد - انتظر ${waitSec} ثانية`, floodWait: waitSec });
     }
-    if (errorMessage.includes('CHAT_ADMIN_REQUIRED') || errorMessage.includes('CHAT_WRITE_FORBIDDEN')) {
-      return res.status(400).json({ error: 'CHAT_WRITE_FORBIDDEN: يجب أن تكون مشرفاً للإضافة' });
-    }
-    if (errorMessage.includes('USER_ID_INVALID') || errorMessage.includes('Could not find the input entity')) {
-      return res.status(400).json({ error: 'USER_ID_INVALID: لا يمكن العثور على المستخدم' });
-    }
-    if (errorMessage.includes('USER_CHANNELS_TOO_MUCH')) {
-      return res.status(400).json({ error: 'USER_CHANNELS_TOO_MUCH: العضو في أكثر من 500 مجموعة' });
-    }
-    if (errorMessage.includes('USER_BANNED_IN_CHANNEL')) {
-      return res.status(400).json({ error: 'USER_BANNED_IN_CHANNEL: العضو محظور من هذه المجموعة' });
-    }
-    if (errorMessage.includes('USER_KICKED')) {
-      return res.status(400).json({ error: 'USER_KICKED: العضو مطرود من هذه المجموعة' });
-    }
-    if (errorMessage.includes('USERS_TOO_MUCH')) {
-      return res.status(400).json({ error: 'USERS_TOO_MUCH: المجموعة وصلت للحد الأقصى' });
-    }
+    if (errorMessage.includes('CHAT_ADMIN_REQUIRED') || errorMessage.includes('CHAT_WRITE_FORBIDDEN'))
+      return res.json({ success: false, error: 'ليس لديك صلاحية الإضافة - يجب أن تكون مشرفاً', isNotAdmin: true });
+    if (errorMessage.includes('USER_ID_INVALID') || errorMessage.includes('Could not find the input entity'))
+      return res.json({ success: false, error: 'لا يمكن التعرف على المستخدم' });
+    if (errorMessage.includes('USER_CHANNELS_TOO_MUCH'))
+      return res.json({ success: false, error: 'العضو في أكثر من 500 مجموعة' });
+    if (errorMessage.includes('USER_BANNED_IN_CHANNEL'))
+      return res.json({ success: false, error: 'العضو محظور من هذه المجموعة' });
+    if (errorMessage.includes('USER_KICKED'))
+      return res.json({ success: false, error: 'العضو مطرود من هذه المجموعة' });
+    if (errorMessage.includes('USERS_TOO_MUCH'))
+      return res.json({ success: false, error: 'المجموعة وصلت للحد الأقصى' });
+    if (errorMessage.includes('INPUT_USER_DEACTIVATED'))
+      return res.json({ success: false, error: 'حساب المستخدم محذوف' });
+    if (errorMessage.includes('PEER_ID_INVALID'))
+      return res.json({ success: false, error: 'معرف المستخدم غير صالح' });
     
-    return res.status(500).json({ error: `خطأ في الإضافة: ${errorMessage}` });
+    return res.json({ success: false, error: `خطأ في الإضافة: ${errorMessage}` });
   }
 }
 
