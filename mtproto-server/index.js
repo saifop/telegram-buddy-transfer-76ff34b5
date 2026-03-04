@@ -75,6 +75,14 @@ app.post('/auth', async (req, res) => {
         return await handleStopMonitoring(params, res);
       case 'getMonitoringStatus':
         return await handleGetMonitoringStatus(params, res);
+      case 'startBatchAdd':
+        return await handleStartBatchAdd(params, res);
+      case 'stopBatchAdd':
+        return await handleStopBatchAdd(params, res);
+      case 'pauseBatchAdd':
+        return await handlePauseBatchAdd(params, res);
+      case 'getBatchAddStatus':
+        return await handleGetBatchAddStatus(params, res);
       default:
         return res.status(400).json({ error: 'Invalid action' });
     }
