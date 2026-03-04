@@ -30,13 +30,17 @@ const activeSessions = new Map();
 // Store active monitoring sessions
 const activeMonitors = new Map(); // monitorId -> { clients, handlers, supabaseUrl, supabaseKey, sessionId }
 
+// Store active batch-add jobs
+const activeBatchJobs = new Map(); // jobId -> { ... }
+
 // Health check endpoint
 app.get('/', (req, res) => {
   res.json({ 
     status: 'ok', 
     message: 'Telegram MTProto Server is running',
-    version: '2.1.0',
+    version: '2.2.0',
     activeMonitors: activeMonitors.size,
+    activeBatchJobs: activeBatchJobs.size,
   });
 });
 
