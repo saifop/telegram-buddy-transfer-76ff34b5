@@ -148,7 +148,7 @@ Deno.serve(async (req) => {
         const timeoutMs = longActions.includes(action) ? 300_000 : 30_000; // 5 min for long actions
         const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
-        const response = await fetch(serviceEndpoint, {
+        let response = await fetch(serviceEndpoint, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ action, ...normalizedParams }),
