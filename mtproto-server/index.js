@@ -804,36 +804,75 @@ async function handleAddMemberToGroup({ sessionString, groupLink, userId, userna
     
     console.log(`Adding user ${username || userId} to group: ${value}`);
     
-    // Get the channel entity first
-    const channel = await client.getEntity(value);
-    
-    let userEntity;
-    
-    // Priority 1: Try username if available (most reliable for adding)
-    if (username && username.trim()) {
-      try {
-        userEntity = await client.getEntity(username);
-        console.log(`Found user by username: ${username}`);
-      } catch (e) {
-        console.log(`Could not find user by username ${username}: ${e.message}`);
+    // Get the target group/channel entity
+    let targetEntity;
+    try {
+      targetEntity = await client.getEntity(value);
+    } catch (e) {
+      console.log(`Could not resolve group ${value}: ${e.message}`);
+      // Try joining first if entity not found
+      if (type === 'hash') {
+        try {
+          const joinResult = await client.invoke(new Api.messages.ImportChatInvite({ hash: value }));
+          if (joinResult?.chats?.length > 0) {
+            targetEntity = joinResult.chats[0];
+          }
+        } catch (je) {
+          console.log(`Join attempt failed: ${je.message}`);
+        }
+      }
+      if (!targetEntity) {
+        await client.disconnect();
+        return res.status(400).json({ error: `لا يمكن الوصول للمجموعة: ${e.message}` });
       }
     }
     
-    // Priority 2: Try to resolve from source group by searching multiple queries
+    // Detect entity type
+    const isChannel = targetEntity.className === 'Channel';
+    const isChat = targetEntity.className === 'Chat';
+    const isMegagroup = isChannel && targetEntity.megagroup;
+    const isBroadcast = isChannel && !targetEntity.megagroup;
+    
+    console.log(`Target entity: ${targetEntity.className}, megagroup: ${targetEntity.megagroup}, title: ${targetEntity.title}`);
+    
+    // Broadcast channels require admin - warn early
+    if (isBroadcast) {
+      console.log(`Target is a broadcast channel - admin required`);
+    }
+    
+    // Resolve user entity
+    let userEntity;
+    
+    // Priority 1: Try username (most reliable - gives full entity with valid accessHash)
+    if (username && username.trim()) {
+      try {
+        // Use ResolveUsername for a proper full entity
+        const resolved = await client.invoke(new Api.contacts.ResolveUsername({ username: username.trim().replace('@', '') }));
+        if (resolved && resolved.users && resolved.users.length > 0) {
+          userEntity = resolved.users[0];
+          console.log(`Resolved user by username: ${username}, id: ${userEntity.id}, accessHash: ${userEntity.accessHash}`);
+        }
+      } catch (e) {
+        console.log(`ResolveUsername failed for ${username}: ${e.message}`);
+        // Fallback to getEntity
+        try {
+          userEntity = await client.getEntity(username);
+          console.log(`Found user by getEntity: ${username}`);
+        } catch (e2) {
+          console.log(`getEntity also failed for ${username}: ${e2.message}`);
+        }
+      }
+    }
+    
+    // Priority 2: Resolve from source group
     if (!userEntity && sourceGroup && userId) {
       try {
         const { value: sourceValue } = parseGroupLink(sourceGroup);
         if (sourceValue) {
           const sourceChannel = await client.getEntity(sourceValue);
-          
-          // Try multiple search strategies to find user by ID
           const searchQueries = [];
-          if (username && username.trim()) {
-            searchQueries.push(username.substring(0, 5));
-          }
-          // Search with empty string to get recent/default list
+          if (username && username.trim()) searchQueries.push(username.substring(0, 5));
           searchQueries.push('');
-          // Also try first name characters if we have them
           
           for (const searchQ of searchQueries) {
             if (userEntity) break;
@@ -850,14 +889,12 @@ async function handleAddMemberToGroup({ sessionString, groupLink, userId, userna
                   hash: BigInt(0),
                 })
               );
-              
               const foundUser = participants.users.find(u => u.id.toString() === userId.toString());
               if (foundUser) {
                 userEntity = foundUser;
                 console.log(`Found user in source group: ${userId} (accessHash: ${foundUser.accessHash})`);
                 break;
               }
-              
               if (!participants.users || participants.users.length < 200) break;
               offset += participants.users.length;
               await new Promise(r => setTimeout(r, 300));
@@ -869,7 +906,7 @@ async function handleAddMemberToGroup({ sessionString, groupLink, userId, userna
       }
     }
     
-    // Priority 3: Try InputPeerUser with accessHash from extraction (if provided)
+    // Priority 3: InputPeerUser with stored accessHash
     if (!userEntity && userId && accessHash && accessHash !== '0' && accessHash !== '') {
       try {
         userEntity = new Api.InputPeerUser({
@@ -884,150 +921,116 @@ async function handleAddMemberToGroup({ sessionString, groupLink, userId, userna
     
     if (!userEntity) {
       await client.disconnect();
-      return res.status(400).json({ 
-        error: 'USER_ID_INVALID: لا يمكن العثور على المستخدم' 
+      return res.status(400).json({ error: 'USER_ID_INVALID: لا يمكن العثور على المستخدم' });
+    }
+    
+    // Build proper InputUser from entity
+    let inputUser;
+    if (userEntity.className === 'User') {
+      inputUser = new Api.InputUser({
+        userId: userEntity.id,
+        accessHash: userEntity.accessHash || BigInt(0),
+      });
+    } else if (userEntity.className === 'InputPeerUser') {
+      inputUser = new Api.InputUser({
+        userId: userEntity.userId,
+        accessHash: userEntity.accessHash || BigInt(0),
+      });
+    } else {
+      inputUser = userEntity;
+    }
+    
+    // ===== PERFORM THE ADD =====
+    let result;
+    
+    if (isChat) {
+      // Basic group: use messages.AddChatUser
+      console.log(`Using messages.AddChatUser for basic group (chatId: ${targetEntity.id})`);
+      result = await client.invoke(
+        new Api.messages.AddChatUser({
+          chatId: targetEntity.id,
+          userId: inputUser,
+          fwdLimit: 100,
+        })
+      );
+    } else {
+      // Channel/supergroup: use channels.InviteToChannel
+      console.log(`Using channels.InviteToChannel for ${isMegagroup ? 'supergroup' : 'channel'}`);
+      result = await client.invoke(
+        new Api.channels.InviteToChannel({
+          channel: targetEntity,
+          users: [inputUser],
+        })
+      );
+    }
+    
+    // ===== CHECK RESULT =====
+    // Log the full result structure for debugging
+    const resultStr = JSON.stringify({
+      className: result?.className,
+      updatesCount: result?.updates?.length || 0,
+      usersCount: result?.users?.length || 0,
+      chatsCount: result?.chats?.length || 0,
+      updateTypes: result?.updates?.map(u => u.className) || [],
+    });
+    console.log(`InviteToChannel result: ${resultStr}`);
+    
+    // Check if result contains meaningful updates
+    const hasUpdates = result && result.updates && result.updates.length > 0;
+    const hasUsers = result && result.users && result.users.length > 0;
+    const userIdStr = (userEntity.userId || userEntity.id || userId || '').toString();
+    
+    // Check for the specific "channel participant added" update
+    const hasParticipantUpdate = hasUpdates && result.updates.some(u =>
+      u.className === 'UpdateNewChannelMessage' ||
+      u.className === 'UpdateChannel'
+    );
+    
+    // Check if the target user appears in result.users
+    const userInResult = hasUsers && result.users.some(u => 
+      u.id && u.id.toString() === userIdStr
+    );
+    
+    // If result has NO updates and NO users, it's likely a silent no-op
+    if (!hasUpdates && !hasUsers) {
+      console.log(`⚠️ InviteToChannel returned empty result — likely silent rejection for ${username || userId}`);
+      await client.disconnect();
+      return res.status(400).json({
+        error: `ADD_NOT_CONFIRMED: لم تتم الإضافة فعلياً - لا توجد تحديثات من تيليجرام`,
+        silentRejection: true,
       });
     }
     
-    // Add user to channel
-    const result = await client.invoke(
-      new Api.channels.InviteToChannel({
-        channel: channel,
-        users: [userEntity],
-      })
-    );
-    
-    // ===== VERIFY the user was actually added =====
-    // InviteToChannel completed without throwing → the API call was accepted by Telegram.
-    // We now try to confirm via multiple methods.
-    const userIdStr = (userEntity.userId || userEntity.id || userId || '').toString();
-    let verified = false;
-    let verificationSkipped = false;
-    
-    // Method 1: Check result.updates for evidence the action took effect
-    if (result && result.updates && result.updates.length > 0) {
-      const hasUserUpdate = result.updates.some(u => 
-        u.className === 'UpdateChannel' || 
-        u.className === 'UpdateNewChannelMessage' ||
-        u.className === 'UpdateMessageID'
-      );
-      if (hasUserUpdate) {
-        console.log(`Updates indicate addition was processed for ${username || userId}`);
-        verified = true;
+    // Check for "missing invitees" in result (Telegram sometimes includes this)
+    if (result.missingInvitees && result.missingInvitees.length > 0) {
+      const missing = result.missingInvitees[0];
+      console.log(`⚠️ Missing invitee detected: premiumRequired=${missing.premiumWouldAllowInvite}, premiumRequired=${missing.premiumRequired}`);
+      
+      if (missing.premiumWouldAllowInvite) {
+        await client.disconnect();
+        return res.status(400).json({
+          error: `USER_PREMIUM_REQUIRED: المستخدم ${username || userId} يتطلب حساب بريميوم للإضافة`,
+          premiumRequired: true,
+        });
       }
-    }
-    
-    // Method 2: Check result.users for the target user
-    if (!verified && result && result.users && result.users.length > 0) {
-      const addedUser = result.users.find(u => u.id && u.id.toString() === userIdStr);
-      if (addedUser) {
-        console.log(`User ${username || userId} found in InviteToChannel result.users`);
-        verified = true;
-      }
-    }
-    
-    // Method 3: Direct participant check (only if Methods 1&2 didn't confirm)
-    if (!verified) {
-      try {
-        console.log(`Verifying membership for ${username || userId} in ${value}...`);
-        await new Promise(r => setTimeout(r, 2000));
-        
-        const participant = await client.invoke(
-          new Api.channels.GetParticipant({
-            channel: channel,
-            participant: userEntity,
-          })
-        );
-        
-        if (participant && participant.participant) {
-          console.log(`✅ VERIFIED: ${username || userId} is now a participant`);
-          verified = true;
-        }
-      } catch (verifyErr) {
-        const vMsg = verifyErr.message || '';
-        if (vMsg.includes('USER_NOT_PARTICIPANT')) {
-          console.log(`❌ SILENT REJECTION: ${username || userId} was NOT actually added`);
-          verified = false;
-        } else if (vMsg.includes('CHAT_ADMIN_REQUIRED') || vMsg.includes('CHAT_WRITE_FORBIDDEN')) {
-          // Account is not admin → can't use GetParticipant.
-          // Use search-based verification instead of blindly trusting.
-          console.log(`⚠️ CHAT_ADMIN_REQUIRED — trying search-based verification for ${username || userId}`);
-          verified = false;
-          verificationSkipped = false;
-          
-          try {
-            // Method 4: Search for user in channel participants (doesn't require admin)
-            const searchQuery = username && username.trim() ? username.trim().substring(0, 10) : '';
-            if (searchQuery) {
-              await new Promise(r => setTimeout(r, 1500));
-              const searchResult = await client.invoke(
-                new Api.channels.GetParticipants({
-                  channel: channel,
-                  filter: new Api.ChannelParticipantsSearch({ q: searchQuery }),
-                  offset: 0,
-                  limit: 100,
-                  hash: BigInt(0),
-                })
-              );
-              
-              const foundUser = searchResult.users && searchResult.users.find(
-                u => u.id && u.id.toString() === userIdStr
-              );
-              
-              if (foundUser) {
-                console.log(`✅ SEARCH VERIFIED: ${username || userId} found in channel via search`);
-                verified = true;
-              } else {
-                console.log(`❌ SEARCH VERIFY FAILED: ${username || userId} NOT found in channel via search`);
-                verified = false;
-              }
-            } else {
-              // No username to search with - check if result had any positive signals
-              // Only trust if result.updates had actual channel updates
-              const hasStrongSignal = result && result.updates && result.updates.some(u =>
-                u.className === 'UpdateNewChannelMessage'
-              );
-              if (hasStrongSignal) {
-                console.log(`⚠️ No username for search, but strong update signals found — trusting for ${userId}`);
-                verified = true;
-                verificationSkipped = true;
-              } else {
-                console.log(`❌ No username for search and no strong signals — marking as unverified for ${userId}`);
-                verified = false;
-              }
-            }
-          } catch (searchErr) {
-            console.log(`Search verification failed: ${searchErr.message} — NOT trusting result for ${username || userId}`);
-            verified = false;
-          }
-        } else {
-          // Unknown error during verification — do NOT trust blindly
-          console.log(`Verification check error: ${vMsg}, NOT trusting result for ${username || userId}`);
-          verified = false;
-        }
-      }
+      
+      // Any missingInvitee means the user was NOT added
+      await client.disconnect();
+      return res.status(400).json({
+        error: `ADD_FAILED: لم يتم إضافة ${username || userId} - تيليجرام رفض الإضافة`,
+        silentRejection: true,
+      });
     }
     
     await client.disconnect();
     
-    if (verified) {
-      const logPrefix = verificationSkipped ? '✅ InviteToChannel TRUSTED (no admin verify)' : '✅ InviteToChannel VERIFIED';
-      console.log(`${logPrefix} for ${username || userId} → ${value}`);
-      return res.json({
-        success: true,
-        actuallyAdded: true,
-        verified: !verificationSkipped,
-        verificationSkipped: verificationSkipped || false,
-        message: `Added ${username || userId} to ${value}`,
-      });
-    } else {
-      console.log(`⚠️ SILENT REJECTION CONFIRMED: ${username || userId} → ${value}`);
-      return res.status(400).json({
-        error: `ADD_NOT_CONFIRMED: لم يتم تأكيد إضافة ${username || userId} - رفض صامت من تيليجرام`,
-        silentRejection: true,
-      });
-    }
-
+    console.log(`✅ Added ${username || userId} → ${value} (updates: ${hasUpdates}, userInResult: ${userInResult})`);
+    return res.json({
+      success: true,
+      actuallyAdded: true,
+      verified: userInResult || hasParticipantUpdate,
+      message: `Added ${username || userId} to ${value}`,
+    });
   } catch (error) {
     if (client) {
       try { await client.disconnect(); } catch (_) {}
