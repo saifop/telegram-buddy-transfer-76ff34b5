@@ -204,8 +204,8 @@ Deno.serve(async (req) => {
           );
         }
 
-        // Use lastResponse instead of response for status checks below
-        const response = lastResponse;
+        // Use lastResponse for all subsequent status checks
+        response = lastResponse;
 
         if (!response.ok) {
           console.error("External service non-OK status:", response.status, data);
