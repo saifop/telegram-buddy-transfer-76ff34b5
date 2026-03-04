@@ -102,33 +102,39 @@ export function ExtractedMembersFile({
         reader.onload = (event) => {
           try {
             const content = event.target?.result as string;
-            const data: ExtractedMemberFile = JSON.parse(content);
+            const parsed = JSON.parse(content);
 
-            if (!data.members || !Array.isArray(data.members)) {
+            // Support both { members: [...] } and plain array [...]
+            let rawMembers: any[];
+            if (Array.isArray(parsed)) {
+              rawMembers = parsed;
+            } else if (parsed.members && Array.isArray(parsed.members)) {
+              rawMembers = parsed.members;
+            } else {
               throw new Error("Invalid file format");
             }
 
             // Get existing member IDs to avoid duplicates
             const existingIds = new Set(members.map((m) => m.oderId));
 
-            const importedMembers: Member[] = data.members
+            const importedMembers: Member[] = rawMembers
               .filter((item) => !existingIds.has(item.id))
               .map((item) => ({
                 id: crypto.randomUUID(),
                 oderId: item.id,
-                username: item.username,
-                firstName: item.firstName,
-                lastName: item.lastName,
-                phone: item.phone,
+                username: item.username || "",
+                firstName: item.firstName || item.first_name || "",
+                lastName: item.lastName || item.last_name || "",
+                phone: item.phone || "",
                 isSelected: true,
                 status: "pending" as const,
               }));
 
-            setImportStats({ total: data.members.length, new: importedMembers.length });
+            setImportStats({ total: rawMembers.length, new: importedMembers.length });
             
             if (importedMembers.length > 0) {
               onImportMembers(importedMembers);
-              addLog("success", `تم استيراد ${importedMembers.length} عضو جديد من ${data.members.length}`);
+              addLog("success", `تم استيراد ${importedMembers.length} عضو جديد من ${rawMembers.length}`);
             } else {
               addLog("warning", "جميع الأعضاء موجودون مسبقاً");
             }
