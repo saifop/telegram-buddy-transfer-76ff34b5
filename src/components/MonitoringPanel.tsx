@@ -49,9 +49,13 @@ interface MonitoringSession {
 }
 
 export function MonitoringPanel({ accounts }: MonitoringPanelProps) {
-  const [groups, setGroups] = useState<string[]>([""]);
-  const [targetGroup, setTargetGroup] = useState("");
-  const [selectedAccounts, setSelectedAccounts] = useState<Set<string>>(new Set());
+  const [groups, setGroups] = useState<string[]>(() => {
+    try { const s = localStorage.getItem("monitoring_groups"); return s ? JSON.parse(s) : [""]; } catch { return [""]; }
+  });
+  const [targetGroup, setTargetGroup] = useState(() => localStorage.getItem("monitoring_target") || "");
+  const [selectedAccounts, setSelectedAccounts] = useState<Set<string>>(() => {
+    try { const s = localStorage.getItem("monitoring_selected_accounts"); return s ? new Set(JSON.parse(s)) : new Set(); } catch { return new Set(); }
+  });
   const [activeSession, setActiveSession] = useState<MonitoringSession | null>(null);
   const [members, setMembers] = useState<MonitoredMember[]>([]);
   const [isStarting, setIsStarting] = useState(false);
@@ -71,6 +75,11 @@ export function MonitoringPanel({ accounts }: MonitoringPanelProps) {
   const connectedAccounts = accounts.filter(
     (a) => a.status === "connected" && a.sessionString
   );
+
+  // Persist selections to localStorage
+  useEffect(() => { localStorage.setItem("monitoring_selected_accounts", JSON.stringify([...selectedAccounts])); }, [selectedAccounts]);
+  useEffect(() => { localStorage.setItem("monitoring_groups", JSON.stringify(groups)); }, [groups]);
+  useEffect(() => { localStorage.setItem("monitoring_target", targetGroup); }, [targetGroup]);
 
   // Load active session on mount
   useEffect(() => {
@@ -299,8 +308,7 @@ export function MonitoringPanel({ accounts }: MonitoringPanelProps) {
     setActiveSession(null);
     setMembers([]);
     setLiveStatus(null);
-    setGroups([""]);
-    setSelectedAccounts(new Set());
+    // Keep groups, targetGroup, and selectedAccounts as-is (user's saved choices)
   };
 
   const formatUptime = (seconds: number) => {
