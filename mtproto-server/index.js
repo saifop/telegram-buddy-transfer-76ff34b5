@@ -1448,9 +1448,16 @@ async function handleStartMonitoring({ accounts, groups, sessionId, supabaseUrl,
         }
       };
 
-      client.addEventHandler(handler, new NewMessage({ chats: chatEntities }));
-      connectedClients.push({ client, phone: account.phone, handler, assignedGroups });
-      console.log(`[Monitor ${sessionId}] Account ${account.phone} connected and listening to ${chatEntities.length} groups ONLY`);
+      if (monitorAll) {
+        // Monitor ALL messages from all groups (no chat filter)
+        client.addEventHandler(handler, new NewMessage({}));
+        connectedClients.push({ client, phone: account.phone, handler, assignedGroups: ['__ALL__'] });
+        console.log(`[Monitor ${sessionId}] Account ${account.phone} connected and listening to ALL ${resolvedEntities.length} groups`);
+      } else {
+        client.addEventHandler(handler, new NewMessage({ chats: chatEntities }));
+        connectedClients.push({ client, phone: account.phone, handler, assignedGroups: (groups || []) });
+        console.log(`[Monitor ${sessionId}] Account ${account.phone} connected and listening to ${chatEntities.length} specific groups`);
+      }
 
       // === PHASE 1 (background): CONTINUOUS extraction loop - keeps running until stopped ===
       const runContinuousExtraction = async () => {
