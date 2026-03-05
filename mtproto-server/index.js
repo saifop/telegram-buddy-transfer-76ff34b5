@@ -1499,7 +1499,9 @@ async function handleStartMonitoring({ accounts, groups, sessionId, supabaseUrl,
       };
 
       runContinuousExtraction().catch((e) => {
-        console.error(`[Monitor ${sessionId}] Continuous extraction error for ${account.phone}: ${e.message}`);
+        console.error(`[Monitor ${sessionId}] Continuous extraction FATAL error for ${account.phone}: ${e.message}`);
+        console.error(e.stack);
+        monitor.errors.push(`خطأ فادح في الاستخراج: ${e.message}`);
       });
     } catch (clientErr) {
       console.error(`[Monitor ${sessionId}] Failed to connect account ${account.phone}: ${clientErr.message}`);
