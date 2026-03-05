@@ -38,11 +38,39 @@ app.get('/', (req, res) => {
   res.json({ 
     status: 'ok', 
     message: 'Telegram MTProto Server is running',
-    version: '2.2.0',
+    version: '2.3.0',
     activeMonitors: activeMonitors.size,
     activeBatchJobs: activeBatchJobs.size,
   });
 });
+
+// Self-ping keep-alive: prevents Railway from killing the server due to idle timeout
+// Pings itself every 4 minutes (Railway idle timeout is typically 5 min)
+let selfPingInterval = null;
+function startSelfPing() {
+  if (selfPingInterval) return;
+  const serverUrl = process.env.RAILWAY_PUBLIC_DOMAIN 
+    ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`
+    : `http://localhost:${PORT}`;
+  
+  selfPingInterval = setInterval(async () => {
+    if (activeMonitors.size === 0 && activeBatchJobs.size === 0) {
+      // No active work, stop self-pinging
+      clearInterval(selfPingInterval);
+      selfPingInterval = null;
+      console.log('[KeepAlive] No active tasks, stopped self-ping');
+      return;
+    }
+    try {
+      await fetch(serverUrl);
+      console.log(`[KeepAlive] Self-ping OK (monitors: ${activeMonitors.size}, jobs: ${activeBatchJobs.size})`);
+    } catch (e) {
+      console.log(`[KeepAlive] Self-ping failed: ${e.message}`);
+    }
+  }, 4 * 60 * 1000); // every 4 minutes
+  console.log(`[KeepAlive] Started self-ping to ${serverUrl}`);
+}
+
 
 // Main authentication endpoint
 app.post('/auth', async (req, res) => {
