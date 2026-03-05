@@ -377,6 +377,18 @@ export function MonitoringPanel({ accounts }: MonitoringPanelProps) {
                     </p>
                   </>
                 )}
+                {liveStatus?.errors && liveStatus.errors.length > 0 && (
+                  <div className="mt-2 space-y-1">
+                    <p className="text-xs font-medium text-destructive">⚠️ أخطاء:</p>
+                    <ScrollArea className="max-h-24">
+                      {liveStatus.errors.map((err, i) => (
+                        <p key={i} className="text-[10px] text-destructive/80 leading-tight">
+                          {err}
+                        </p>
+                      ))}
+                    </ScrollArea>
+                  </div>
+                )}
               </div>
               <div className="flex gap-2">
                 {isRunning ? (
