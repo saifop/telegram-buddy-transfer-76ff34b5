@@ -70,6 +70,7 @@ export function MonitoringPanel({ accounts }: MonitoringPanelProps) {
     autoAddEnabled?: boolean;
     uptime?: number;
     connectedAccounts?: number;
+    errors?: string[];
   } | null>(null);
 
   const connectedAccounts = accounts.filter(
