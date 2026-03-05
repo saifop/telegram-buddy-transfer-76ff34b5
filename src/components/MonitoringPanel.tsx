@@ -17,8 +17,10 @@ import {
   Clock,
   RefreshCw,
   CheckSquare,
+  Globe,
 } from "lucide-react";
 import { Checkbox } from "@/components/ui/checkbox";
+import { Switch } from "@/components/ui/switch";
 import { toast } from "sonner";
 
 interface MonitoringPanelProps {
@@ -52,6 +54,7 @@ export function MonitoringPanel({ accounts }: MonitoringPanelProps) {
   const [groups, setGroups] = useState<string[]>(() => {
     try { const s = localStorage.getItem("monitoring_groups"); return s ? JSON.parse(s) : [""]; } catch { return [""]; }
   });
+  const [monitorAll, setMonitorAll] = useState(() => localStorage.getItem("monitoring_all") === "true");
   const [targetGroup, setTargetGroup] = useState(() => localStorage.getItem("monitoring_target") || "");
   const [selectedAccounts, setSelectedAccounts] = useState<Set<string>>(() => {
     try { const s = localStorage.getItem("monitoring_selected_accounts"); return s ? new Set(JSON.parse(s)) : new Set(); } catch { return new Set(); }
@@ -80,6 +83,8 @@ export function MonitoringPanel({ accounts }: MonitoringPanelProps) {
   // Persist selections to localStorage
   useEffect(() => { localStorage.setItem("monitoring_selected_accounts", JSON.stringify([...selectedAccounts])); }, [selectedAccounts]);
   useEffect(() => { localStorage.setItem("monitoring_groups", JSON.stringify(groups)); }, [groups]);
+  useEffect(() => { localStorage.setItem("monitoring_target", targetGroup); }, [targetGroup]);
+  useEffect(() => { localStorage.setItem("monitoring_all", monitorAll ? "true" : "false"); }, [monitorAll]);
   useEffect(() => { localStorage.setItem("monitoring_target", targetGroup); }, [targetGroup]);
 
   // Load active session on mount
@@ -187,8 +192,8 @@ export function MonitoringPanel({ accounts }: MonitoringPanelProps) {
 
   const handleStart = async () => {
     const validGroups = groups.filter((g) => g.trim());
-    if (validGroups.length === 0) {
-      toast.error("أدخل رابط مجموعة واحد على الأقل");
+    if (!monitorAll && validGroups.length === 0) {
+      toast.error("أدخل رابط مجموعة واحد على الأقل أو فعّل مراقبة جميع المجموعات");
       return;
     }
     if (selectedAccounts.size === 0) {
@@ -202,7 +207,7 @@ export function MonitoringPanel({ accounts }: MonitoringPanelProps) {
         .from("monitoring_sessions")
         .insert({
           status: "idle",
-          groups: validGroups as unknown as any,
+          groups: (monitorAll ? ["__ALL__"] : validGroups) as unknown as any,
           accounts: Array.from(selectedAccounts).map((id) => {
             const acc = accounts.find((a) => a.id === id);
             return { phone: acc?.phone || "" };
@@ -234,7 +239,8 @@ export function MonitoringPanel({ accounts }: MonitoringPanelProps) {
         body: {
           action: "startMonitoring",
           accounts: accountsData,
-          groups: validGroups,
+          groups: monitorAll ? [] : validGroups,
+          monitorAll,
           sessionId: session.id,
           supabaseUrl,
           supabaseKey,
@@ -359,7 +365,7 @@ export function MonitoringPanel({ accounts }: MonitoringPanelProps) {
                 )}
               </div>
               <div className="text-sm space-y-1">
-                <p>المجموعات: {activeSession.groups?.length || 0}</p>
+                <p>المجموعات: {activeSession.groups?.[0] === "__ALL__" ? "جميع المجموعات" : (activeSession.groups?.length || 0)}</p>
                 <p>الحسابات المتصلة: {liveStatus?.connectedAccounts || activeSession.accounts?.length || 0}</p>
                 <p className="font-semibold">
                   الأعضاء المكتشفين: {liveStatus?.membersFound ?? members.length}
@@ -422,35 +428,49 @@ export function MonitoringPanel({ accounts }: MonitoringPanelProps) {
               <CardTitle className="text-sm">إعداد المراقبة</CardTitle>
             </CardHeader>
             <CardContent className="space-y-3">
-              {/* Groups */}
-              <div className="space-y-2">
-                <label className="text-xs font-medium text-muted-foreground">روابط المجموعات</label>
-                {groups.map((g, i) => (
-                  <div key={i} className="flex gap-1">
-                    <Input
-                      placeholder="رابط المجموعة..."
-                      value={g}
-                      onChange={(e) => handleGroupChange(i, e.target.value)}
-                      className="text-xs h-8"
-                      dir="ltr"
-                    />
-                    {groups.length > 1 && (
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        onClick={() => handleRemoveGroup(i)}
-                        className="h-8 w-8 shrink-0"
-                      >
-                        <Trash2 className="w-3 h-3" />
-                      </Button>
-                    )}
+              {/* Monitor All Toggle */}
+              <div className="flex items-center justify-between p-2 rounded border border-border/50 bg-muted/30">
+                <div className="flex items-center gap-2">
+                  <Globe className="w-4 h-4 text-primary" />
+                  <div>
+                    <label className="text-xs font-medium">مراقبة جميع المجموعات</label>
+                    <p className="text-[10px] text-muted-foreground">يراقب كل المجموعات المنضم لها الحساب</p>
                   </div>
-                ))}
-                <Button variant="outline" size="sm" onClick={handleAddGroup} className="w-full h-7 text-xs">
-                  <Plus className="w-3 h-3 ml-1" />
-                  إضافة مجموعة
-                </Button>
+                </div>
+                <Switch checked={monitorAll} onCheckedChange={setMonitorAll} />
               </div>
+
+              {/* Groups - only show when not monitoring all */}
+              {!monitorAll && (
+                <div className="space-y-2">
+                  <label className="text-xs font-medium text-muted-foreground">روابط المجموعات</label>
+                  {groups.map((g, i) => (
+                    <div key={i} className="flex gap-1">
+                      <Input
+                        placeholder="رابط المجموعة..."
+                        value={g}
+                        onChange={(e) => handleGroupChange(i, e.target.value)}
+                        className="text-xs h-8"
+                        dir="ltr"
+                      />
+                      {groups.length > 1 && (
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          onClick={() => handleRemoveGroup(i)}
+                          className="h-8 w-8 shrink-0"
+                        >
+                          <Trash2 className="w-3 h-3" />
+                        </Button>
+                      )}
+                    </div>
+                  ))}
+                  <Button variant="outline" size="sm" onClick={handleAddGroup} className="w-full h-7 text-xs">
+                    <Plus className="w-3 h-3 ml-1" />
+                    إضافة مجموعة
+                  </Button>
+                </div>
+              )}
 
               {/* Target Group */}
               <div className="space-y-2">

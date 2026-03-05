@@ -1126,9 +1126,9 @@ async function handleAddMemberToGroup({ sessionString, groupLink, userId, userna
  * Start monitoring groups for new messages
  * Connects accounts to groups and listens for messages in real-time
  */
-async function handleStartMonitoring({ accounts, groups, sessionId, supabaseUrl, supabaseKey, targetGroup }, res) {
-  if (!accounts || !accounts.length || !groups || !groups.length || !sessionId || !supabaseUrl || !supabaseKey) {
-    return res.status(400).json({ error: 'Missing required parameters: accounts, groups, sessionId, supabaseUrl, supabaseKey' });
+async function handleStartMonitoring({ accounts, groups, sessionId, supabaseUrl, supabaseKey, targetGroup, monitorAll }, res) {
+  if (!accounts || !accounts.length || !sessionId || !supabaseUrl || !supabaseKey) {
+    return res.status(400).json({ error: 'Missing required parameters: accounts, sessionId, supabaseUrl, supabaseKey' });
   }
 
   // Stop existing monitor with same sessionId if any
@@ -1141,7 +1141,8 @@ async function handleStartMonitoring({ accounts, groups, sessionId, supabaseUrl,
     sessionId,
     supabaseUrl,
     supabaseKey,
-    groups: groups,
+    groups: groups || [],
+    monitorAll: !!monitorAll,
     targetGroup: targetGroup || null,
     startedAt: Date.now(),
     membersFound: 0,
@@ -1153,7 +1154,7 @@ async function handleStartMonitoring({ accounts, groups, sessionId, supabaseUrl,
     addQueue: [],
   };
 
-  console.log(`[Monitor ${sessionId}] Starting monitoring for ${groups.length} groups with ${accounts.length} accounts`);
+  console.log(`[Monitor ${sessionId}] Starting monitoring ${monitorAll ? '(ALL groups)' : `for ${(groups || []).length} groups`} with ${accounts.length} accounts`);
 
   // Helper: store member in Supabase AND queue for auto-add
   const storeMember = async (memberData) => {
@@ -1289,91 +1290,108 @@ async function handleStartMonitoring({ accounts, groups, sessionId, supabaseUrl,
         account.apiHash || 'demo'
       );
       
-      // Assign groups to this account
-      const assignedGroups = [];
-      for (let g = 0; g < groups.length; g++) {
-        if (g % accounts.length === i) {
-          assignedGroups.push(groups[g]);
-        }
-      }
-
       const resolvedEntities = []; // { entity, groupLink, title }
 
-      // Join each group and resolve entity
-      for (const groupLink of assignedGroups) {
+      if (monitorAll) {
+        // === MONITOR ALL: Fetch all groups/channels the account is in ===
+        console.log(`[Monitor ${sessionId}] Fetching all dialogs for account ${account.phone}...`);
         try {
-          const { type, value } = parseGroupLink(groupLink);
-          let entity = null;
-
-          if (type === 'hash') {
-            // Try CheckChatInvite first to avoid FLOOD_WAIT if already joined
+          const dialogs = await client.getDialogs({ limit: 500 });
+          let groupCount = 0;
+          for (const dialog of dialogs) {
             try {
-              const checkResult = await client.invoke(new Api.messages.CheckChatInvite({ hash: value }));
-              entity = checkResult?.chat || null;
-              if (entity) {
-                console.log(`[Monitor ${sessionId}] Already in group (hash), resolved via CheckChatInvite`);
-              }
+              const entity = dialog.entity;
+              if (!entity) continue;
+              // Only monitor groups and supergroups (not private chats or channels without chat)
+              const isGroup = entity.className === 'Chat' || 
+                (entity.className === 'Channel' && (entity.megagroup || entity.gigagroup));
+              if (!isGroup) continue;
+              
+              const chatId = entity.id?.value !== undefined ? entity.id.value.toString() : entity.id?.toString();
+              if (chatId) monitor.resolvedChatIds.add(chatId);
+              resolvedEntities.push({ entity, groupLink: entity.username || chatId, title: entity.title || chatId });
+              groupCount++;
             } catch (e) {
-              // If check fails, try joining
-              try {
-                const joinResult = await client.invoke(new Api.messages.ImportChatInvite({ hash: value }));
-                if (joinResult?.chats?.length > 0) entity = joinResult.chats[0];
-              } catch (je) {
-                if (je.message?.includes('USER_ALREADY_PARTICIPANT')) {
-                  // Already in, try resolving again
-                  try {
-                    const cr2 = await client.invoke(new Api.messages.CheckChatInvite({ hash: value }));
-                    entity = cr2?.chat || null;
-                  } catch (_) {}
-                } else if (je.message?.includes('FLOOD_WAIT') || je.message?.includes('wait')) {
-                  const ws = (je.message.match(/(\d+)/)?.[1]) || '60';
-                  console.log(`[Monitor ${sessionId}] FLOOD_WAIT ${ws}s joining ${groupLink}, waiting...`);
-                  await new Promise(r => setTimeout(r, (parseInt(ws) + 2) * 1000));
-                  // Retry once after wait
-                  try {
-                    const jr2 = await client.invoke(new Api.messages.ImportChatInvite({ hash: value }));
-                    if (jr2?.chats?.length > 0) entity = jr2.chats[0];
-                  } catch (re) {
-                    if (re.message?.includes('USER_ALREADY_PARTICIPANT')) {
-                      try { const cr3 = await client.invoke(new Api.messages.CheckChatInvite({ hash: value })); entity = cr3?.chat || null; } catch (_) {}
-                    } else { throw re; }
-                  }
-                } else { throw je; }
-              }
+              // Skip individual dialog errors
             }
-          } else {
-            try {
-              entity = await client.getEntity(value);
-              console.log(`[Monitor ${sessionId}] Already resolved public group: ${value}`);
-            } catch (e) {
-              // Not resolved, try joining
+          }
+          console.log(`[Monitor ${sessionId}] Account ${account.phone} found ${groupCount} groups from dialogs`);
+        } catch (dialogErr) {
+          console.error(`[Monitor ${sessionId}] Failed to fetch dialogs: ${dialogErr.message}`);
+          monitor.errors.push(`فشل جلب المجموعات: ${dialogErr.message}`);
+        }
+      } else {
+        // === SPECIFIC GROUPS: Original behavior ===
+        const assignedGroups = [];
+        for (let g = 0; g < (groups || []).length; g++) {
+          if (g % accounts.length === i) {
+            assignedGroups.push(groups[g]);
+          }
+        }
+
+        // Join each group and resolve entity
+        for (const groupLink of assignedGroups) {
+          try {
+            const { type, value } = parseGroupLink(groupLink);
+            let entity = null;
+
+            if (type === 'hash') {
               try {
-                await client.invoke(new Api.channels.JoinChannel({ channel: value }));
-              } catch (je) {
-                if (!je.message?.includes('USER_ALREADY_PARTICIPANT')) {
-                  if (je.message?.includes('FLOOD_WAIT')) {
+                const checkResult = await client.invoke(new Api.messages.CheckChatInvite({ hash: value }));
+                entity = checkResult?.chat || null;
+                if (entity) console.log(`[Monitor ${sessionId}] Already in group (hash), resolved via CheckChatInvite`);
+              } catch (e) {
+                try {
+                  const joinResult = await client.invoke(new Api.messages.ImportChatInvite({ hash: value }));
+                  if (joinResult?.chats?.length > 0) entity = joinResult.chats[0];
+                } catch (je) {
+                  if (je.message?.includes('USER_ALREADY_PARTICIPANT')) {
+                    try { const cr2 = await client.invoke(new Api.messages.CheckChatInvite({ hash: value })); entity = cr2?.chat || null; } catch (_) {}
+                  } else if (je.message?.includes('FLOOD_WAIT') || je.message?.includes('wait')) {
                     const ws = (je.message.match(/(\d+)/)?.[1]) || '60';
+                    console.log(`[Monitor ${sessionId}] FLOOD_WAIT ${ws}s joining ${groupLink}, waiting...`);
                     await new Promise(r => setTimeout(r, (parseInt(ws) + 2) * 1000));
-                    try { await client.invoke(new Api.channels.JoinChannel({ channel: value })); } catch (_) {}
+                    try {
+                      const jr2 = await client.invoke(new Api.messages.ImportChatInvite({ hash: value }));
+                      if (jr2?.chats?.length > 0) entity = jr2.chats[0];
+                    } catch (re) {
+                      if (re.message?.includes('USER_ALREADY_PARTICIPANT')) {
+                        try { const cr3 = await client.invoke(new Api.messages.CheckChatInvite({ hash: value })); entity = cr3?.chat || null; } catch (_) {}
+                      } else { throw re; }
+                    }
                   } else { throw je; }
                 }
               }
-              try { entity = await client.getEntity(value); } catch (_) {}
+            } else {
+              try {
+                entity = await client.getEntity(value);
+              } catch (e) {
+                try { await client.invoke(new Api.channels.JoinChannel({ channel: value })); } catch (je) {
+                  if (!je.message?.includes('USER_ALREADY_PARTICIPANT')) {
+                    if (je.message?.includes('FLOOD_WAIT')) {
+                      const ws = (je.message.match(/(\d+)/)?.[1]) || '60';
+                      await new Promise(r => setTimeout(r, (parseInt(ws) + 2) * 1000));
+                      try { await client.invoke(new Api.channels.JoinChannel({ channel: value })); } catch (_) {}
+                    } else { throw je; }
+                  }
+                }
+                try { entity = await client.getEntity(value); } catch (_) {}
+              }
             }
-          }
 
-          if (entity) {
-            const chatId = entity.id?.value !== undefined ? entity.id.value.toString() : entity.id?.toString();
-            if (chatId) monitor.resolvedChatIds.add(chatId);
-            resolvedEntities.push({ entity, groupLink, title: entity.title || value });
-            console.log(`[Monitor ${sessionId}] Account ${account.phone} joined ${groupLink} (ID: ${chatId})`);
-          } else {
-            console.error(`[Monitor ${sessionId}] Could not resolve entity for ${groupLink}`);
-            monitor.errors.push(`فشل تحديد مجموعة ${groupLink}`);
+            if (entity) {
+              const chatId = entity.id?.value !== undefined ? entity.id.value.toString() : entity.id?.toString();
+              if (chatId) monitor.resolvedChatIds.add(chatId);
+              resolvedEntities.push({ entity, groupLink, title: entity.title || value });
+              console.log(`[Monitor ${sessionId}] Account ${account.phone} joined ${groupLink} (ID: ${chatId})`);
+            } else {
+              console.error(`[Monitor ${sessionId}] Could not resolve entity for ${groupLink}`);
+              monitor.errors.push(`فشل تحديد مجموعة ${groupLink}`);
+            }
+          } catch (joinErr) {
+            console.error(`[Monitor ${sessionId}] Failed to join ${groupLink}: ${joinErr.message}`);
+            monitor.errors.push(`فشل انضمام ${account.phone} لـ ${groupLink}: ${joinErr.message}`);
           }
-        } catch (joinErr) {
-          console.error(`[Monitor ${sessionId}] Failed to join ${groupLink}: ${joinErr.message}`);
-          monitor.errors.push(`فشل انضمام ${account.phone} لـ ${groupLink}: ${joinErr.message}`);
         }
       }
 
@@ -1431,11 +1449,21 @@ async function handleStartMonitoring({ accounts, groups, sessionId, supabaseUrl,
         }
       };
 
-      client.addEventHandler(handler, new NewMessage({ chats: chatEntities }));
-      connectedClients.push({ client, phone: account.phone, handler, assignedGroups });
-      console.log(`[Monitor ${sessionId}] Account ${account.phone} connected and listening to ${chatEntities.length} groups ONLY`);
+      if (monitorAll) {
+        // Monitor ALL messages from all groups (no chat filter)
+        client.addEventHandler(handler, new NewMessage({}));
+        connectedClients.push({ client, phone: account.phone, handler, assignedGroups: ['__ALL__'] });
+        console.log(`[Monitor ${sessionId}] Account ${account.phone} connected and listening to ALL ${resolvedEntities.length} groups`);
+      } else {
+        client.addEventHandler(handler, new NewMessage({ chats: chatEntities }));
+        connectedClients.push({ client, phone: account.phone, handler, assignedGroups: (groups || []) });
+        console.log(`[Monitor ${sessionId}] Account ${account.phone} connected and listening to ${chatEntities.length} specific groups`);
+      }
 
-      // === PHASE 1 (background): CONTINUOUS extraction loop - keeps running until stopped ===
+      // === PHASE 1 (background): CONTINUOUS extraction loop - skip for monitorAll mode ===
+      if (monitorAll) {
+        console.log(`[Monitor ${sessionId}] MonitorAll mode: skipping extraction loop (message-only monitoring)`);
+      } else {
       const runContinuousExtraction = async () => {
         let cycleCount = 0;
         while (!monitor.stopRequested && activeMonitors.has(sessionId)) {
@@ -1531,6 +1559,7 @@ async function handleStartMonitoring({ accounts, groups, sessionId, supabaseUrl,
         console.error(e.stack);
         monitor.errors.push(`خطأ فادح في الاستخراج: ${e.message}`);
       });
+      } // end of !monitorAll else block
     } catch (clientErr) {
       console.error(`[Monitor ${sessionId}] Failed to connect account ${account.phone}: ${clientErr.message}`);
       monitor.errors.push(`فشل اتصال ${account.phone}: ${clientErr.message}`);
