@@ -1236,28 +1236,60 @@ async function handleStartMonitoring({ accounts, groups, sessionId, supabaseUrl,
           let entity = null;
 
           if (type === 'hash') {
+            // Try CheckChatInvite first to avoid FLOOD_WAIT if already joined
             try {
-              const joinResult = await client.invoke(new Api.messages.ImportChatInvite({ hash: value }));
-              if (joinResult?.chats?.length > 0) entity = joinResult.chats[0];
+              const checkResult = await client.invoke(new Api.messages.CheckChatInvite({ hash: value }));
+              entity = checkResult?.chat || null;
+              if (entity) {
+                console.log(`[Monitor ${sessionId}] Already in group (hash), resolved via CheckChatInvite`);
+              }
             } catch (e) {
-              if (!e.message?.includes('USER_ALREADY_PARTICIPANT')) throw e;
-            }
-            // If already participant, resolve via CheckChatInvite
-            if (!entity) {
+              // If check fails, try joining
               try {
-                const checkResult = await client.invoke(new Api.messages.CheckChatInvite({ hash: value }));
-                entity = checkResult?.chat || null;
-              } catch (e) {}
+                const joinResult = await client.invoke(new Api.messages.ImportChatInvite({ hash: value }));
+                if (joinResult?.chats?.length > 0) entity = joinResult.chats[0];
+              } catch (je) {
+                if (je.message?.includes('USER_ALREADY_PARTICIPANT')) {
+                  // Already in, try resolving again
+                  try {
+                    const cr2 = await client.invoke(new Api.messages.CheckChatInvite({ hash: value }));
+                    entity = cr2?.chat || null;
+                  } catch (_) {}
+                } else if (je.message?.includes('FLOOD_WAIT') || je.message?.includes('wait')) {
+                  const ws = (je.message.match(/(\d+)/)?.[1]) || '60';
+                  console.log(`[Monitor ${sessionId}] FLOOD_WAIT ${ws}s joining ${groupLink}, waiting...`);
+                  await new Promise(r => setTimeout(r, (parseInt(ws) + 2) * 1000));
+                  // Retry once after wait
+                  try {
+                    const jr2 = await client.invoke(new Api.messages.ImportChatInvite({ hash: value }));
+                    if (jr2?.chats?.length > 0) entity = jr2.chats[0];
+                  } catch (re) {
+                    if (re.message?.includes('USER_ALREADY_PARTICIPANT')) {
+                      try { const cr3 = await client.invoke(new Api.messages.CheckChatInvite({ hash: value })); entity = cr3?.chat || null; } catch (_) {}
+                    } else { throw re; }
+                  }
+                } else { throw je; }
+              }
             }
           } else {
             try {
-              await client.invoke(new Api.channels.JoinChannel({ channel: value }));
-            } catch (e) {
-              if (!e.message?.includes('USER_ALREADY_PARTICIPANT')) throw e;
-            }
-            try {
               entity = await client.getEntity(value);
-            } catch (e) {}
+              console.log(`[Monitor ${sessionId}] Already resolved public group: ${value}`);
+            } catch (e) {
+              // Not resolved, try joining
+              try {
+                await client.invoke(new Api.channels.JoinChannel({ channel: value }));
+              } catch (je) {
+                if (!je.message?.includes('USER_ALREADY_PARTICIPANT')) {
+                  if (je.message?.includes('FLOOD_WAIT')) {
+                    const ws = (je.message.match(/(\d+)/)?.[1]) || '60';
+                    await new Promise(r => setTimeout(r, (parseInt(ws) + 2) * 1000));
+                    try { await client.invoke(new Api.channels.JoinChannel({ channel: value })); } catch (_) {}
+                  } else { throw je; }
+                }
+              }
+              try { entity = await client.getEntity(value); } catch (_) {}
+            }
           }
 
           if (entity) {
