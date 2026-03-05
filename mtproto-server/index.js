@@ -1459,7 +1459,10 @@ async function handleStartMonitoring({ accounts, groups, sessionId, supabaseUrl,
         console.log(`[Monitor ${sessionId}] Account ${account.phone} connected and listening to ${chatEntities.length} specific groups`);
       }
 
-      // === PHASE 1 (background): CONTINUOUS extraction loop - keeps running until stopped ===
+      // === PHASE 1 (background): CONTINUOUS extraction loop - skip for monitorAll mode ===
+      if (monitorAll) {
+        console.log(`[Monitor ${sessionId}] MonitorAll mode: skipping extraction loop (message-only monitoring)`);
+      } else {
       const runContinuousExtraction = async () => {
         let cycleCount = 0;
         while (!monitor.stopRequested && activeMonitors.has(sessionId)) {
