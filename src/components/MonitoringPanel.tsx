@@ -428,35 +428,49 @@ export function MonitoringPanel({ accounts }: MonitoringPanelProps) {
               <CardTitle className="text-sm">إعداد المراقبة</CardTitle>
             </CardHeader>
             <CardContent className="space-y-3">
-              {/* Groups */}
-              <div className="space-y-2">
-                <label className="text-xs font-medium text-muted-foreground">روابط المجموعات</label>
-                {groups.map((g, i) => (
-                  <div key={i} className="flex gap-1">
-                    <Input
-                      placeholder="رابط المجموعة..."
-                      value={g}
-                      onChange={(e) => handleGroupChange(i, e.target.value)}
-                      className="text-xs h-8"
-                      dir="ltr"
-                    />
-                    {groups.length > 1 && (
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        onClick={() => handleRemoveGroup(i)}
-                        className="h-8 w-8 shrink-0"
-                      >
-                        <Trash2 className="w-3 h-3" />
-                      </Button>
-                    )}
+              {/* Monitor All Toggle */}
+              <div className="flex items-center justify-between p-2 rounded border border-border/50 bg-muted/30">
+                <div className="flex items-center gap-2">
+                  <Globe className="w-4 h-4 text-primary" />
+                  <div>
+                    <label className="text-xs font-medium">مراقبة جميع المجموعات</label>
+                    <p className="text-[10px] text-muted-foreground">يراقب كل المجموعات المنضم لها الحساب</p>
                   </div>
-                ))}
-                <Button variant="outline" size="sm" onClick={handleAddGroup} className="w-full h-7 text-xs">
-                  <Plus className="w-3 h-3 ml-1" />
-                  إضافة مجموعة
-                </Button>
+                </div>
+                <Switch checked={monitorAll} onCheckedChange={setMonitorAll} />
               </div>
+
+              {/* Groups - only show when not monitoring all */}
+              {!monitorAll && (
+                <div className="space-y-2">
+                  <label className="text-xs font-medium text-muted-foreground">روابط المجموعات</label>
+                  {groups.map((g, i) => (
+                    <div key={i} className="flex gap-1">
+                      <Input
+                        placeholder="رابط المجموعة..."
+                        value={g}
+                        onChange={(e) => handleGroupChange(i, e.target.value)}
+                        className="text-xs h-8"
+                        dir="ltr"
+                      />
+                      {groups.length > 1 && (
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          onClick={() => handleRemoveGroup(i)}
+                          className="h-8 w-8 shrink-0"
+                        >
+                          <Trash2 className="w-3 h-3" />
+                        </Button>
+                      )}
+                    </div>
+                  ))}
+                  <Button variant="outline" size="sm" onClick={handleAddGroup} className="w-full h-7 text-xs">
+                    <Plus className="w-3 h-3 ml-1" />
+                    إضافة مجموعة
+                  </Button>
+                </div>
+              )}
 
               {/* Target Group */}
               <div className="space-y-2">
