@@ -1515,6 +1515,8 @@ async function handleStartMonitoring({ accounts, groups, sessionId, supabaseUrl,
   }
 
   monitor.clients = connectedClients;
+  // Start self-ping to prevent Railway idle timeout
+  startSelfPing();
   activeMonitors.set(sessionId, monitor);
 
   // Start auto-add worker if target group is set
