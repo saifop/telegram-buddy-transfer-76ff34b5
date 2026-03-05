@@ -1936,6 +1936,17 @@ function generateSessionId() {
   return 'sess_' + Date.now().toString(36) + Math.random().toString(36).substr(2, 9);
 }
 
+// Global error handlers - prevent process crashes from killing monitoring
+process.on('uncaughtException', (err) => {
+  console.error(`[FATAL] Uncaught exception (process NOT killed): ${err.message}`);
+  console.error(err.stack);
+});
+
+process.on('unhandledRejection', (reason) => {
+  console.error(`[FATAL] Unhandled rejection (process NOT killed): ${reason}`);
+  if (reason?.stack) console.error(reason.stack);
+});
+
 // Cleanup on shutdown
 process.on('SIGTERM', async () => {
   console.log('Shutting down...');
@@ -1951,7 +1962,7 @@ process.on('SIGTERM', async () => {
 
 // Start the server
 app.listen(PORT, () => {
-  console.log(`🚀 Telegram MTProto Server running on port ${PORT}`);
+  console.log(`🚀 Telegram MTProto Server v2.3.0 running on port ${PORT}`);
   console.log(`📍 Health check: http://localhost:${PORT}/`);
   console.log(`🔐 Auth endpoint: POST http://localhost:${PORT}/auth`);
 });
