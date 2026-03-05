@@ -1289,91 +1289,108 @@ async function handleStartMonitoring({ accounts, groups, sessionId, supabaseUrl,
         account.apiHash || 'demo'
       );
       
-      // Assign groups to this account
-      const assignedGroups = [];
-      for (let g = 0; g < groups.length; g++) {
-        if (g % accounts.length === i) {
-          assignedGroups.push(groups[g]);
-        }
-      }
-
       const resolvedEntities = []; // { entity, groupLink, title }
 
-      // Join each group and resolve entity
-      for (const groupLink of assignedGroups) {
+      if (monitorAll) {
+        // === MONITOR ALL: Fetch all groups/channels the account is in ===
+        console.log(`[Monitor ${sessionId}] Fetching all dialogs for account ${account.phone}...`);
         try {
-          const { type, value } = parseGroupLink(groupLink);
-          let entity = null;
-
-          if (type === 'hash') {
-            // Try CheckChatInvite first to avoid FLOOD_WAIT if already joined
+          const dialogs = await client.getDialogs({ limit: 500 });
+          let groupCount = 0;
+          for (const dialog of dialogs) {
             try {
-              const checkResult = await client.invoke(new Api.messages.CheckChatInvite({ hash: value }));
-              entity = checkResult?.chat || null;
-              if (entity) {
-                console.log(`[Monitor ${sessionId}] Already in group (hash), resolved via CheckChatInvite`);
-              }
+              const entity = dialog.entity;
+              if (!entity) continue;
+              // Only monitor groups and supergroups (not private chats or channels without chat)
+              const isGroup = entity.className === 'Chat' || 
+                (entity.className === 'Channel' && (entity.megagroup || entity.gigagroup));
+              if (!isGroup) continue;
+              
+              const chatId = entity.id?.value !== undefined ? entity.id.value.toString() : entity.id?.toString();
+              if (chatId) monitor.resolvedChatIds.add(chatId);
+              resolvedEntities.push({ entity, groupLink: entity.username || chatId, title: entity.title || chatId });
+              groupCount++;
             } catch (e) {
-              // If check fails, try joining
-              try {
-                const joinResult = await client.invoke(new Api.messages.ImportChatInvite({ hash: value }));
-                if (joinResult?.chats?.length > 0) entity = joinResult.chats[0];
-              } catch (je) {
-                if (je.message?.includes('USER_ALREADY_PARTICIPANT')) {
-                  // Already in, try resolving again
-                  try {
-                    const cr2 = await client.invoke(new Api.messages.CheckChatInvite({ hash: value }));
-                    entity = cr2?.chat || null;
-                  } catch (_) {}
-                } else if (je.message?.includes('FLOOD_WAIT') || je.message?.includes('wait')) {
-                  const ws = (je.message.match(/(\d+)/)?.[1]) || '60';
-                  console.log(`[Monitor ${sessionId}] FLOOD_WAIT ${ws}s joining ${groupLink}, waiting...`);
-                  await new Promise(r => setTimeout(r, (parseInt(ws) + 2) * 1000));
-                  // Retry once after wait
-                  try {
-                    const jr2 = await client.invoke(new Api.messages.ImportChatInvite({ hash: value }));
-                    if (jr2?.chats?.length > 0) entity = jr2.chats[0];
-                  } catch (re) {
-                    if (re.message?.includes('USER_ALREADY_PARTICIPANT')) {
-                      try { const cr3 = await client.invoke(new Api.messages.CheckChatInvite({ hash: value })); entity = cr3?.chat || null; } catch (_) {}
-                    } else { throw re; }
-                  }
-                } else { throw je; }
-              }
+              // Skip individual dialog errors
             }
-          } else {
-            try {
-              entity = await client.getEntity(value);
-              console.log(`[Monitor ${sessionId}] Already resolved public group: ${value}`);
-            } catch (e) {
-              // Not resolved, try joining
+          }
+          console.log(`[Monitor ${sessionId}] Account ${account.phone} found ${groupCount} groups from dialogs`);
+        } catch (dialogErr) {
+          console.error(`[Monitor ${sessionId}] Failed to fetch dialogs: ${dialogErr.message}`);
+          monitor.errors.push(`فشل جلب المجموعات: ${dialogErr.message}`);
+        }
+      } else {
+        // === SPECIFIC GROUPS: Original behavior ===
+        const assignedGroups = [];
+        for (let g = 0; g < (groups || []).length; g++) {
+          if (g % accounts.length === i) {
+            assignedGroups.push(groups[g]);
+          }
+        }
+
+        // Join each group and resolve entity
+        for (const groupLink of assignedGroups) {
+          try {
+            const { type, value } = parseGroupLink(groupLink);
+            let entity = null;
+
+            if (type === 'hash') {
               try {
-                await client.invoke(new Api.channels.JoinChannel({ channel: value }));
-              } catch (je) {
-                if (!je.message?.includes('USER_ALREADY_PARTICIPANT')) {
-                  if (je.message?.includes('FLOOD_WAIT')) {
+                const checkResult = await client.invoke(new Api.messages.CheckChatInvite({ hash: value }));
+                entity = checkResult?.chat || null;
+                if (entity) console.log(`[Monitor ${sessionId}] Already in group (hash), resolved via CheckChatInvite`);
+              } catch (e) {
+                try {
+                  const joinResult = await client.invoke(new Api.messages.ImportChatInvite({ hash: value }));
+                  if (joinResult?.chats?.length > 0) entity = joinResult.chats[0];
+                } catch (je) {
+                  if (je.message?.includes('USER_ALREADY_PARTICIPANT')) {
+                    try { const cr2 = await client.invoke(new Api.messages.CheckChatInvite({ hash: value })); entity = cr2?.chat || null; } catch (_) {}
+                  } else if (je.message?.includes('FLOOD_WAIT') || je.message?.includes('wait')) {
                     const ws = (je.message.match(/(\d+)/)?.[1]) || '60';
+                    console.log(`[Monitor ${sessionId}] FLOOD_WAIT ${ws}s joining ${groupLink}, waiting...`);
                     await new Promise(r => setTimeout(r, (parseInt(ws) + 2) * 1000));
-                    try { await client.invoke(new Api.channels.JoinChannel({ channel: value })); } catch (_) {}
+                    try {
+                      const jr2 = await client.invoke(new Api.messages.ImportChatInvite({ hash: value }));
+                      if (jr2?.chats?.length > 0) entity = jr2.chats[0];
+                    } catch (re) {
+                      if (re.message?.includes('USER_ALREADY_PARTICIPANT')) {
+                        try { const cr3 = await client.invoke(new Api.messages.CheckChatInvite({ hash: value })); entity = cr3?.chat || null; } catch (_) {}
+                      } else { throw re; }
+                    }
                   } else { throw je; }
                 }
               }
-              try { entity = await client.getEntity(value); } catch (_) {}
+            } else {
+              try {
+                entity = await client.getEntity(value);
+              } catch (e) {
+                try { await client.invoke(new Api.channels.JoinChannel({ channel: value })); } catch (je) {
+                  if (!je.message?.includes('USER_ALREADY_PARTICIPANT')) {
+                    if (je.message?.includes('FLOOD_WAIT')) {
+                      const ws = (je.message.match(/(\d+)/)?.[1]) || '60';
+                      await new Promise(r => setTimeout(r, (parseInt(ws) + 2) * 1000));
+                      try { await client.invoke(new Api.channels.JoinChannel({ channel: value })); } catch (_) {}
+                    } else { throw je; }
+                  }
+                }
+                try { entity = await client.getEntity(value); } catch (_) {}
+              }
             }
-          }
 
-          if (entity) {
-            const chatId = entity.id?.value !== undefined ? entity.id.value.toString() : entity.id?.toString();
-            if (chatId) monitor.resolvedChatIds.add(chatId);
-            resolvedEntities.push({ entity, groupLink, title: entity.title || value });
-            console.log(`[Monitor ${sessionId}] Account ${account.phone} joined ${groupLink} (ID: ${chatId})`);
-          } else {
-            console.error(`[Monitor ${sessionId}] Could not resolve entity for ${groupLink}`);
-            monitor.errors.push(`فشل تحديد مجموعة ${groupLink}`);
+            if (entity) {
+              const chatId = entity.id?.value !== undefined ? entity.id.value.toString() : entity.id?.toString();
+              if (chatId) monitor.resolvedChatIds.add(chatId);
+              resolvedEntities.push({ entity, groupLink, title: entity.title || value });
+              console.log(`[Monitor ${sessionId}] Account ${account.phone} joined ${groupLink} (ID: ${chatId})`);
+            } else {
+              console.error(`[Monitor ${sessionId}] Could not resolve entity for ${groupLink}`);
+              monitor.errors.push(`فشل تحديد مجموعة ${groupLink}`);
+            }
+          } catch (joinErr) {
+            console.error(`[Monitor ${sessionId}] Failed to join ${groupLink}: ${joinErr.message}`);
+            monitor.errors.push(`فشل انضمام ${account.phone} لـ ${groupLink}: ${joinErr.message}`);
           }
-        } catch (joinErr) {
-          console.error(`[Monitor ${sessionId}] Failed to join ${groupLink}: ${joinErr.message}`);
-          monitor.errors.push(`فشل انضمام ${account.phone} لـ ${groupLink}: ${joinErr.message}`);
         }
       }
 
