@@ -1126,9 +1126,9 @@ async function handleAddMemberToGroup({ sessionString, groupLink, userId, userna
  * Start monitoring groups for new messages
  * Connects accounts to groups and listens for messages in real-time
  */
-async function handleStartMonitoring({ accounts, groups, sessionId, supabaseUrl, supabaseKey, targetGroup }, res) {
-  if (!accounts || !accounts.length || !groups || !groups.length || !sessionId || !supabaseUrl || !supabaseKey) {
-    return res.status(400).json({ error: 'Missing required parameters: accounts, groups, sessionId, supabaseUrl, supabaseKey' });
+async function handleStartMonitoring({ accounts, groups, sessionId, supabaseUrl, supabaseKey, targetGroup, monitorAll }, res) {
+  if (!accounts || !accounts.length || !sessionId || !supabaseUrl || !supabaseKey) {
+    return res.status(400).json({ error: 'Missing required parameters: accounts, sessionId, supabaseUrl, supabaseKey' });
   }
 
   // Stop existing monitor with same sessionId if any
