@@ -1527,7 +1527,9 @@ async function handleStartMonitoring({ accounts, groups, sessionId, supabaseUrl,
     try {
       const addClient = await getClientFromSession(addAcc.sessionString, addAcc.apiId || 123456, addAcc.apiHash || 'demo');
       startAutoAddWorker(addClient).catch((e) => {
-        console.error(`[Monitor ${sessionId}] Auto-add worker crashed: ${e.message}`);
+        console.error(`[Monitor ${sessionId}] Auto-add worker FATAL crash: ${e.message}`);
+        console.error(e.stack);
+        monitor.errors.push(`خطأ فادح في الإضافة التلقائية: ${e.message}`);
       });
     } catch (e) {
       monitor.errors.push(`فشل تشغيل الإضافة التلقائية: ${e.message}`);
