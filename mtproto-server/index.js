@@ -103,6 +103,10 @@ app.post('/auth', async (req, res) => {
 
   try {
     switch (action) {
+      case 'getServerLogs':
+        const search = params.search?.toLowerCase();
+        const logs = search ? recentLogs.filter(l => l.toLowerCase().includes(search)) : recentLogs;
+        return res.json({ logs: logs.slice(-100), total: recentLogs.length, uptime: Math.floor(process.uptime()) });
       case 'sendCode':
         return await handleSendCode(params, res);
       case 'verifyCode':
