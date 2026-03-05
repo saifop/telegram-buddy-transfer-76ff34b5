@@ -38,10 +38,34 @@ app.get('/', (req, res) => {
   res.json({ 
     status: 'ok', 
     message: 'Telegram MTProto Server is running',
-    version: '2.3.0',
+    version: '2.3.1',
     activeMonitors: activeMonitors.size,
     activeBatchJobs: activeBatchJobs.size,
+    uptime: Math.floor(process.uptime()),
+    memoryMB: Math.round(process.memoryUsage().rss / 1024 / 1024),
   });
+});
+
+// Recent logs buffer for remote debugging
+const recentLogs = [];
+const MAX_LOGS = 200;
+const originalLog = console.log;
+const originalError = console.error;
+const originalWarn = console.warn;
+const addLog = (level, args) => {
+  const msg = `[${new Date().toISOString()}] [${level}] ${args.map(a => typeof a === 'string' ? a : JSON.stringify(a)).join(' ')}`;
+  recentLogs.push(msg);
+  if (recentLogs.length > MAX_LOGS) recentLogs.shift();
+};
+console.log = (...args) => { addLog('INFO', args); originalLog.apply(console, args); };
+console.error = (...args) => { addLog('ERROR', args); originalError.apply(console, args); };
+console.warn = (...args) => { addLog('WARN', args); originalWarn.apply(console, args); };
+
+// Remote log viewer endpoint
+app.get('/logs', (req, res) => {
+  const search = req.query.search?.toLowerCase();
+  const logs = search ? recentLogs.filter(l => l.toLowerCase().includes(search)) : recentLogs;
+  res.json({ logs: logs.slice(-100), total: recentLogs.length });
 });
 
 // Self-ping keep-alive: prevents Railway from killing the server due to idle timeout
