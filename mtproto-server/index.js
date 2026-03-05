@@ -1153,17 +1153,31 @@ async function handleStartMonitoring({ accounts, groups, sessionId, supabaseUrl,
     let targetEntity;
     try {
       if (tType === 'hash') {
+        // Check first to avoid FLOOD_WAIT
         try {
-          const jr = await addClient.invoke(new Api.messages.ImportChatInvite({ hash: tValue }));
-          if (jr?.chats?.length > 0) targetEntity = jr.chats[0];
-        } catch (e) { if (!e.message?.includes('USER_ALREADY_PARTICIPANT')) throw e; }
-        if (!targetEntity) {
           const cr = await addClient.invoke(new Api.messages.CheckChatInvite({ hash: tValue }));
           targetEntity = cr?.chat || null;
+        } catch (e) {
+          try {
+            const jr = await addClient.invoke(new Api.messages.ImportChatInvite({ hash: tValue }));
+            if (jr?.chats?.length > 0) targetEntity = jr.chats[0];
+          } catch (je) {
+            if (je.message?.includes('USER_ALREADY_PARTICIPANT')) {
+              try { const cr2 = await addClient.invoke(new Api.messages.CheckChatInvite({ hash: tValue })); targetEntity = cr2?.chat || null; } catch (_) {}
+            } else if (je.message?.includes('FLOOD_WAIT')) {
+              const ws = (je.message.match(/(\d+)/)?.[1]) || '60';
+              await new Promise(r => setTimeout(r, (parseInt(ws) + 2) * 1000));
+              try { const jr2 = await addClient.invoke(new Api.messages.ImportChatInvite({ hash: tValue })); if (jr2?.chats?.length > 0) targetEntity = jr2.chats[0]; } catch (re) {
+                if (re.message?.includes('USER_ALREADY_PARTICIPANT')) { try { const cr3 = await addClient.invoke(new Api.messages.CheckChatInvite({ hash: tValue })); targetEntity = cr3?.chat || null; } catch (_) {} }
+              }
+            } else { throw je; }
+          }
         }
       } else {
-        try { await addClient.invoke(new Api.channels.JoinChannel({ channel: tValue })); } catch (e) {}
-        targetEntity = await addClient.getEntity(tValue);
+        try { targetEntity = await addClient.getEntity(tValue); } catch (e) {
+          try { await addClient.invoke(new Api.channels.JoinChannel({ channel: tValue })); } catch (_) {}
+          targetEntity = await addClient.getEntity(tValue);
+        }
       }
     } catch (e) {
       monitor.errors.push(`فشل الوصول للمجموعة الهدف: ${e.message}`);
