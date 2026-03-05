@@ -17,8 +17,10 @@ import {
   Clock,
   RefreshCw,
   CheckSquare,
+  Globe,
 } from "lucide-react";
 import { Checkbox } from "@/components/ui/checkbox";
+import { Switch } from "@/components/ui/switch";
 import { toast } from "sonner";
 
 interface MonitoringPanelProps {
