@@ -190,8 +190,8 @@ export function MonitoringPanel({ accounts }: MonitoringPanelProps) {
 
   const handleStart = async () => {
     const validGroups = groups.filter((g) => g.trim());
-    if (validGroups.length === 0) {
-      toast.error("أدخل رابط مجموعة واحد على الأقل");
+    if (!monitorAll && validGroups.length === 0) {
+      toast.error("أدخل رابط مجموعة واحد على الأقل أو فعّل مراقبة جميع المجموعات");
       return;
     }
     if (selectedAccounts.size === 0) {
