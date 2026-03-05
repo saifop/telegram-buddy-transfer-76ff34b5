@@ -205,7 +205,7 @@ export function MonitoringPanel({ accounts }: MonitoringPanelProps) {
         .from("monitoring_sessions")
         .insert({
           status: "idle",
-          groups: validGroups as unknown as any,
+          groups: (monitorAll ? ["__ALL__"] : validGroups) as unknown as any,
           accounts: Array.from(selectedAccounts).map((id) => {
             const acc = accounts.find((a) => a.id === id);
             return { phone: acc?.phone || "" };
