@@ -237,7 +237,8 @@ export function MonitoringPanel({ accounts }: MonitoringPanelProps) {
         body: {
           action: "startMonitoring",
           accounts: accountsData,
-          groups: validGroups,
+          groups: monitorAll ? [] : validGroups,
+          monitorAll,
           sessionId: session.id,
           supabaseUrl,
           supabaseKey,
