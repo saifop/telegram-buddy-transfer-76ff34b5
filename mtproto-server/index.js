@@ -38,10 +38,34 @@ app.get('/', (req, res) => {
   res.json({ 
     status: 'ok', 
     message: 'Telegram MTProto Server is running',
-    version: '2.3.0',
+    version: '2.3.1',
     activeMonitors: activeMonitors.size,
     activeBatchJobs: activeBatchJobs.size,
+    uptime: Math.floor(process.uptime()),
+    memoryMB: Math.round(process.memoryUsage().rss / 1024 / 1024),
   });
+});
+
+// Recent logs buffer for remote debugging
+const recentLogs = [];
+const MAX_LOGS = 200;
+const originalLog = console.log;
+const originalError = console.error;
+const originalWarn = console.warn;
+const addLog = (level, args) => {
+  const msg = `[${new Date().toISOString()}] [${level}] ${args.map(a => typeof a === 'string' ? a : JSON.stringify(a)).join(' ')}`;
+  recentLogs.push(msg);
+  if (recentLogs.length > MAX_LOGS) recentLogs.shift();
+};
+console.log = (...args) => { addLog('INFO', args); originalLog.apply(console, args); };
+console.error = (...args) => { addLog('ERROR', args); originalError.apply(console, args); };
+console.warn = (...args) => { addLog('WARN', args); originalWarn.apply(console, args); };
+
+// Remote log viewer endpoint
+app.get('/logs', (req, res) => {
+  const search = req.query.search?.toLowerCase();
+  const logs = search ? recentLogs.filter(l => l.toLowerCase().includes(search)) : recentLogs;
+  res.json({ logs: logs.slice(-100), total: recentLogs.length });
 });
 
 // Self-ping keep-alive: prevents Railway from killing the server due to idle timeout
@@ -79,6 +103,10 @@ app.post('/auth', async (req, res) => {
 
   try {
     switch (action) {
+      case 'getServerLogs':
+        const search = params.search?.toLowerCase();
+        const logs = search ? recentLogs.filter(l => l.toLowerCase().includes(search)) : recentLogs;
+        return res.json({ logs: logs.slice(-100), total: recentLogs.length, uptime: Math.floor(process.uptime()) });
       case 'sendCode':
         return await handleSendCode(params, res);
       case 'verifyCode':
@@ -1499,7 +1527,9 @@ async function handleStartMonitoring({ accounts, groups, sessionId, supabaseUrl,
       };
 
       runContinuousExtraction().catch((e) => {
-        console.error(`[Monitor ${sessionId}] Continuous extraction error for ${account.phone}: ${e.message}`);
+        console.error(`[Monitor ${sessionId}] Continuous extraction FATAL error for ${account.phone}: ${e.message}`);
+        console.error(e.stack);
+        monitor.errors.push(`خطأ فادح في الاستخراج: ${e.message}`);
       });
     } catch (clientErr) {
       console.error(`[Monitor ${sessionId}] Failed to connect account ${account.phone}: ${clientErr.message}`);
@@ -1525,7 +1555,9 @@ async function handleStartMonitoring({ accounts, groups, sessionId, supabaseUrl,
     try {
       const addClient = await getClientFromSession(addAcc.sessionString, addAcc.apiId || 123456, addAcc.apiHash || 'demo');
       startAutoAddWorker(addClient).catch((e) => {
-        console.error(`[Monitor ${sessionId}] Auto-add worker crashed: ${e.message}`);
+        console.error(`[Monitor ${sessionId}] Auto-add worker FATAL crash: ${e.message}`);
+        console.error(e.stack);
+        monitor.errors.push(`خطأ فادح في الإضافة التلقائية: ${e.message}`);
       });
     } catch (e) {
       monitor.errors.push(`فشل تشغيل الإضافة التلقائية: ${e.message}`);
@@ -1936,6 +1968,17 @@ function generateSessionId() {
   return 'sess_' + Date.now().toString(36) + Math.random().toString(36).substr(2, 9);
 }
 
+// Global error handlers - prevent process crashes from killing monitoring
+process.on('uncaughtException', (err) => {
+  console.error(`[FATAL] Uncaught exception (process NOT killed): ${err.message}`);
+  console.error(err.stack);
+});
+
+process.on('unhandledRejection', (reason) => {
+  console.error(`[FATAL] Unhandled rejection (process NOT killed): ${reason}`);
+  if (reason?.stack) console.error(reason.stack);
+});
+
 // Cleanup on shutdown
 process.on('SIGTERM', async () => {
   console.log('Shutting down...');
@@ -1951,7 +1994,7 @@ process.on('SIGTERM', async () => {
 
 // Start the server
 app.listen(PORT, () => {
-  console.log(`🚀 Telegram MTProto Server running on port ${PORT}`);
+  console.log(`🚀 Telegram MTProto Server v2.3.0 running on port ${PORT}`);
   console.log(`📍 Health check: http://localhost:${PORT}/`);
   console.log(`🔐 Auth endpoint: POST http://localhost:${PORT}/auth`);
 });
