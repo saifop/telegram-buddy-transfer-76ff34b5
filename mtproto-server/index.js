@@ -1558,6 +1558,7 @@ async function handleStartMonitoring({ accounts, groups, sessionId, supabaseUrl,
         console.error(e.stack);
         monitor.errors.push(`خطأ فادح في الاستخراج: ${e.message}`);
       });
+      } // end of !monitorAll else block
     } catch (clientErr) {
       console.error(`[Monitor ${sessionId}] Failed to connect account ${account.phone}: ${clientErr.message}`);
       monitor.errors.push(`فشل اتصال ${account.phone}: ${clientErr.message}`);
