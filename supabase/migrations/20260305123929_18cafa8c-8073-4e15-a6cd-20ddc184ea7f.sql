@@ -1,0 +1,1 @@
+ALTER TABLE public.monitored_members ADD CONSTRAINT monitored_members_session_user_unique UNIQUE (session_id, telegram_user_id);
