@@ -1141,7 +1141,8 @@ async function handleStartMonitoring({ accounts, groups, sessionId, supabaseUrl,
     sessionId,
     supabaseUrl,
     supabaseKey,
-    groups: groups,
+    groups: groups || [],
+    monitorAll: !!monitorAll,
     targetGroup: targetGroup || null,
     startedAt: Date.now(),
     membersFound: 0,
@@ -1153,7 +1154,7 @@ async function handleStartMonitoring({ accounts, groups, sessionId, supabaseUrl,
     addQueue: [],
   };
 
-  console.log(`[Monitor ${sessionId}] Starting monitoring for ${groups.length} groups with ${accounts.length} accounts`);
+  console.log(`[Monitor ${sessionId}] Starting monitoring ${monitorAll ? '(ALL groups)' : `for ${(groups || []).length} groups`} with ${accounts.length} accounts`);
 
   // Helper: store member in Supabase AND queue for auto-add
   const storeMember = async (memberData) => {
