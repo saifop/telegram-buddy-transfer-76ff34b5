@@ -1700,6 +1700,7 @@ async function handleStartBatchAdd({ accounts, members, targetGroup, sourceGroup
   };
 
   activeBatchJobs.set(id, job);
+  startSelfPing(); // Keep Railway alive during batch jobs
   console.log(`[BatchAdd ${id}] Starting: ${members.length} members, ${accounts.length} accounts → ${targetGroup}`);
 
   // Respond immediately
