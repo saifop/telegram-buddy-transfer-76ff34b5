@@ -52,6 +52,7 @@ export function MonitoringPanel({ accounts }: MonitoringPanelProps) {
   const [groups, setGroups] = useState<string[]>(() => {
     try { const s = localStorage.getItem("monitoring_groups"); return s ? JSON.parse(s) : [""]; } catch { return [""]; }
   });
+  const [monitorAll, setMonitorAll] = useState(() => localStorage.getItem("monitoring_all") === "true");
   const [targetGroup, setTargetGroup] = useState(() => localStorage.getItem("monitoring_target") || "");
   const [selectedAccounts, setSelectedAccounts] = useState<Set<string>>(() => {
     try { const s = localStorage.getItem("monitoring_selected_accounts"); return s ? new Set(JSON.parse(s)) : new Set(); } catch { return new Set(); }
