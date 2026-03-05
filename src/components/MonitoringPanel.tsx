@@ -82,6 +82,8 @@ export function MonitoringPanel({ accounts }: MonitoringPanelProps) {
   useEffect(() => { localStorage.setItem("monitoring_selected_accounts", JSON.stringify([...selectedAccounts])); }, [selectedAccounts]);
   useEffect(() => { localStorage.setItem("monitoring_groups", JSON.stringify(groups)); }, [groups]);
   useEffect(() => { localStorage.setItem("monitoring_target", targetGroup); }, [targetGroup]);
+  useEffect(() => { localStorage.setItem("monitoring_all", monitorAll ? "true" : "false"); }, [monitorAll]);
+  useEffect(() => { localStorage.setItem("monitoring_target", targetGroup); }, [targetGroup]);
 
   // Load active session on mount
   useEffect(() => {
