@@ -1317,6 +1317,7 @@ async function handleStartMonitoring({ accounts, groups, sessionId, supabaseUrl,
             }
           }
           console.log(`[Monitor ${sessionId}] Account ${account.phone} found ${groupCount} groups from dialogs`);
+          monitor.resolvedGroupCount = groupCount;
         } catch (dialogErr) {
           console.error(`[Monitor ${sessionId}] Failed to fetch dialogs: ${dialogErr.message}`);
           monitor.errors.push(`فشل جلب المجموعات: ${dialogErr.message}`);
