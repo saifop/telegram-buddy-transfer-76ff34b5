@@ -365,7 +365,13 @@ export function MonitoringPanel({ accounts }: MonitoringPanelProps) {
                 )}
               </div>
               <div className="text-sm space-y-1">
-                <p>المجموعات: {activeSession.groups?.[0] === "__ALL__" ? "جميع المجموعات" : (activeSession.groups?.length || 0)}</p>
+                <p>المجموعات: {
+                  typeof liveStatus?.groups === 'string' && liveStatus.groups.startsWith('all_')
+                    ? `جميع المجموعات (${liveStatus.groups.split('_')[1]})`
+                    : activeSession.groups?.[0] === "__ALL__" 
+                      ? "جميع المجموعات" 
+                      : (Array.isArray(liveStatus?.groups) ? liveStatus.groups.length : activeSession.groups?.length || 0)
+                }</p>
                 <p>الحسابات المتصلة: {liveStatus?.connectedAccounts || activeSession.accounts?.length || 0}</p>
                 <p className="font-semibold">
                   الأعضاء المكتشفين: {liveStatus?.membersFound ?? members.length}
