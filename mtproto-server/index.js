@@ -1689,7 +1689,7 @@ async function handleGetMonitoringStatus({ sessionId }, res) {
       active: true,
       sessionId,
       connectedAccounts: monitor.clients.length,
-      groups: monitor.groups,
+      groups: monitor.monitorAll ? `all_${monitor.resolvedGroupCount || 0}` : monitor.groups,
       membersFound: monitor.membersFound,
       membersAdded: monitor.membersAdded || 0,
       membersFailed: monitor.membersFailed || 0,
