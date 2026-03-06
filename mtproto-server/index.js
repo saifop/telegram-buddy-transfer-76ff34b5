@@ -1460,17 +1460,18 @@ async function handleStartMonitoring({ accounts, groups, sessionId, supabaseUrl,
         console.log(`[Monitor ${sessionId}] Account ${account.phone} connected and listening to ${chatEntities.length} specific groups`);
       }
 
-      // === PHASE 1 (background): CONTINUOUS extraction loop - skip for monitorAll mode ===
-      if (monitorAll) {
-        console.log(`[Monitor ${sessionId}] MonitorAll mode: skipping extraction loop (message-only monitoring)`);
-      } else {
+      // === PHASE 1 (background): CONTINUOUS extraction loop ===
       const runContinuousExtraction = async () => {
         let cycleCount = 0;
+        // For monitorAll, limit to first 20 groups per cycle to avoid flood
+        const entitiesToExtract = monitorAll ? resolvedEntities.slice(0, 20) : resolvedEntities;
+        console.log(`[Monitor ${sessionId}] Starting extraction on ${entitiesToExtract.length} groups (monitorAll=${monitorAll})`);
+        
         while (!monitor.stopRequested && activeMonitors.has(sessionId)) {
           cycleCount++;
-          console.log(`[Monitor ${sessionId}] Starting extraction cycle #${cycleCount} for account ${account.phone}`);
+          console.log(`[Monitor ${sessionId}] Starting extraction cycle #${cycleCount} for account ${account.phone} (${entitiesToExtract.length} groups)`);
 
-          for (const { entity, title } of resolvedEntities) {
+          for (const { entity, title } of entitiesToExtract) {
             if (monitor.stopRequested || !activeMonitors.has(sessionId)) return;
 
             console.log(`[Monitor ${sessionId}] Cycle #${cycleCount}: Extracting from "${title}"...`);
@@ -1543,10 +1544,12 @@ async function handleStartMonitoring({ accounts, groups, sessionId, supabaseUrl,
             }
 
             console.log(`[Monitor ${sessionId}] Cycle #${cycleCount} for "${title}": ${extractedCount} new members`);
+            // Small delay between groups
+            await new Promise(r => setTimeout(r, 500));
           }
 
           // Wait 60 seconds before next extraction cycle
-          console.log(`[Monitor ${sessionId}] Cycle #${cycleCount} complete. Waiting 60s before next cycle...`);
+          console.log(`[Monitor ${sessionId}] Cycle #${cycleCount} complete. Total found so far: ${monitor.membersFound}. Waiting 60s...`);
           for (let w = 0; w < 60; w++) {
             if (monitor.stopRequested || !activeMonitors.has(sessionId)) return;
             await new Promise(r => setTimeout(r, 1000));
@@ -1559,7 +1562,6 @@ async function handleStartMonitoring({ accounts, groups, sessionId, supabaseUrl,
         console.error(e.stack);
         monitor.errors.push(`خطأ فادح في الاستخراج: ${e.message}`);
       });
-      } // end of !monitorAll else block
     } catch (clientErr) {
       console.error(`[Monitor ${sessionId}] Failed to connect account ${account.phone}: ${clientErr.message}`);
       monitor.errors.push(`فشل اتصال ${account.phone}: ${clientErr.message}`);
