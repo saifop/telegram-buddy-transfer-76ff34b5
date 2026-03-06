@@ -1469,6 +1469,9 @@ async function handleStartMonitoring({ accounts, groups, sessionId, supabaseUrl,
         const entitiesToExtract = monitorAll ? resolvedEntities.slice(0, 20) : resolvedEntities;
         console.log(`[Monitor ${sessionId}] Starting extraction on ${entitiesToExtract.length} groups (monitorAll=${monitorAll})`);
         
+        // Track groups where GetParticipants failed (use message history instead)
+        const adminBlockedGroups = new Set();
+        
         while (!monitor.stopRequested && activeMonitors.has(sessionId)) {
           cycleCount++;
           console.log(`[Monitor ${sessionId}] Starting extraction cycle #${cycleCount} for account ${account.phone} (${entitiesToExtract.length} groups)`);
@@ -1479,75 +1482,134 @@ async function handleStartMonitoring({ accounts, groups, sessionId, supabaseUrl,
             console.log(`[Monitor ${sessionId}] Cycle #${cycleCount}: Extracting from "${title}"...`);
             let extractedCount = 0;
 
-            const searchQueries = [
-              '', 'a','b','c','d','e','f','g','h','i','j','k','l','m',
-              'n','o','p','q','r','s','t','u','v','w','x','y','z',
-              '0','1','2','3','4','5','6','7','8','9',
-              'ا','ب','ت','ث','ج','ح','خ','د','ذ','ر','ز','س','ش',
-              'ص','ض','ط','ظ','ع','غ','ف','ق','ك','ل','م','ن','ه','و','ي',
-            ];
-
-            for (const q of searchQueries) {
-              if (monitor.stopRequested || !activeMonitors.has(sessionId)) return;
-              let offset = 0;
-
-              while (true) {
-                if (monitor.stopRequested || !activeMonitors.has(sessionId)) return;
-                try {
-                  const participants = await client.invoke(
-                    new Api.channels.GetParticipants({
-                      channel: entity,
-                      filter: new Api.ChannelParticipantsSearch({ q }),
-                      offset,
-                      limit: 200,
-                      hash: BigInt(0),
-                    })
-                  );
-
-                  const users = participants.users || [];
-                  if (users.length === 0) break;
-
-                  for (const u of users) {
-                    const uid = u.id?.toString();
-                    if (uid && !u.bot) {
-                      const stored = await storeMember({
-                        session_id: sessionId,
-                        telegram_user_id: uid,
-                        username: u.username || null,
-                        first_name: u.firstName || null,
-                        last_name: u.lastName || null,
-                        access_hash: u.accessHash ? u.accessHash.toString() : null,
-                        source_group: title,
-                        message_text: null,
-                      });
-                      if (stored) extractedCount++;
+            // === Try GetParticipants first (if not blocked) ===
+            if (!adminBlockedGroups.has(title)) {
+              try {
+                const participants = await client.invoke(
+                  new Api.channels.GetParticipants({
+                    channel: entity,
+                    filter: new Api.ChannelParticipantsSearch({ q: '' }),
+                    offset: 0,
+                    limit: 200,
+                    hash: BigInt(0),
+                  })
+                );
+                const users = participants.users || [];
+                for (const u of users) {
+                  const uid = u.id?.toString();
+                  if (uid && !u.bot) {
+                    const stored = await storeMember({
+                      session_id: sessionId,
+                      telegram_user_id: uid,
+                      username: u.username || null,
+                      first_name: u.firstName || null,
+                      last_name: u.lastName || null,
+                      access_hash: u.accessHash ? u.accessHash.toString() : null,
+                      source_group: title,
+                      message_text: null,
+                    });
+                    if (stored) extractedCount++;
+                  }
+                }
+                // If first batch worked, do more queries
+                if (users.length > 0) {
+                  const extraQueries = ['a','b','c','m','ا','م','ع'];
+                  for (const q of extraQueries) {
+                    if (monitor.stopRequested) return;
+                    try {
+                      const p2 = await client.invoke(
+                        new Api.channels.GetParticipants({
+                          channel: entity,
+                          filter: new Api.ChannelParticipantsSearch({ q }),
+                          offset: 0, limit: 200, hash: BigInt(0),
+                        })
+                      );
+                      for (const u of (p2.users || [])) {
+                        const uid = u.id?.toString();
+                        if (uid && !u.bot) {
+                          const stored = await storeMember({
+                            session_id: sessionId, telegram_user_id: uid,
+                            username: u.username || null, first_name: u.firstName || null,
+                            last_name: u.lastName || null,
+                            access_hash: u.accessHash ? u.accessHash.toString() : null,
+                            source_group: title, message_text: null,
+                          });
+                          if (stored) extractedCount++;
+                        }
+                      }
+                      await new Promise(r => setTimeout(r, 500));
+                    } catch (e2) {
+                      const m2 = e2.message || '';
+                      if (m2.includes('FLOOD')) {
+                        const ws = (m2.match(/(\d+)/) || [])[1];
+                        await new Promise(r => setTimeout(r, ((parseInt(ws) || 5) + 2) * 1000));
+                      }
+                      break;
                     }
                   }
+                }
+              } catch (err) {
+                const msg = err.message || '';
+                if (msg.includes('CHAT_ADMIN_REQUIRED') || msg.includes('CHANNEL_PRIVATE')) {
+                  console.log(`[Monitor ${sessionId}] "${title}": GetParticipants blocked, using message history fallback`);
+                  adminBlockedGroups.add(title);
+                } else if (msg.includes('FLOOD')) {
+                  const waitSec = parseInt((msg.match(/(\d+)/) || [])[1]) || 5;
+                  console.log(`[Monitor ${sessionId}] FLOOD_WAIT ${waitSec}s`);
+                  await new Promise(r => setTimeout(r, (waitSec + 2) * 1000));
+                } else if (msg.includes('TIMEOUT')) {
+                  console.log(`[Monitor ${sessionId}] TIMEOUT on "${title}", retrying after 10s...`);
+                  await new Promise(r => setTimeout(r, 10000));
+                } else {
+                  console.log(`[Monitor ${sessionId}] GetParticipants error on "${title}": ${msg}`);
+                }
+              }
+            }
 
-                  if (users.length < 200) break;
-                  offset += users.length;
-                  await new Promise(r => setTimeout(r, 300));
-                } catch (err) {
-                  const msg = err.message || '';
-                  if (msg.includes('FLOOD')) {
-                    const waitMatch = msg.match(/FLOOD_WAIT[_\s]*(\d+)/i);
-                    const waitSec = waitMatch ? parseInt(waitMatch[1]) : 5;
-                    console.log(`[Monitor ${sessionId}] FLOOD_WAIT ${waitSec}s, waiting...`);
-                    await new Promise(r => setTimeout(r, (waitSec + 1) * 1000));
-                    continue;
+            // === Fallback: Extract from message history ===
+            if (adminBlockedGroups.has(title)) {
+              try {
+                console.log(`[Monitor ${sessionId}] Using message history for "${title}"...`);
+                const messages = await client.getMessages(entity, { limit: 100 });
+                const seenUsers = new Set();
+                for (const msg of messages) {
+                  if (!msg.senderId) continue;
+                  const uid = msg.senderId.toString();
+                  if (seenUsers.has(uid)) continue;
+                  seenUsers.add(uid);
+                  
+                  try {
+                    const sender = await msg.getSender();
+                    if (!sender || sender.bot) continue;
+                    const stored = await storeMember({
+                      session_id: sessionId,
+                      telegram_user_id: uid,
+                      username: sender.username || null,
+                      first_name: sender.firstName || null,
+                      last_name: sender.lastName || null,
+                      access_hash: sender.accessHash ? sender.accessHash.toString() : null,
+                      source_group: title,
+                      message_text: (msg.text || '').substring(0, 200),
+                    });
+                    if (stored) extractedCount++;
+                  } catch (senderErr) {
+                    // Skip if can't resolve sender
                   }
-                  if (msg.includes('CHAT_ADMIN_REQUIRED')) {
-                    console.log(`[Monitor ${sessionId}] Not admin in "${title}", skipping GetParticipants`);
-                    break;
-                  }
-                  break;
+                }
+              } catch (histErr) {
+                const hm = histErr.message || '';
+                if (hm.includes('TIMEOUT')) {
+                  console.log(`[Monitor ${sessionId}] TIMEOUT on message history "${title}", skip`);
+                  await new Promise(r => setTimeout(r, 5000));
+                } else {
+                  console.log(`[Monitor ${sessionId}] Message history error for "${title}": ${hm}`);
                 }
               }
             }
 
             console.log(`[Monitor ${sessionId}] Cycle #${cycleCount} for "${title}": ${extractedCount} new members`);
-            // Small delay between groups
-            await new Promise(r => setTimeout(r, 500));
+            // Delay between groups
+            await new Promise(r => setTimeout(r, 1000));
           }
 
           // Wait 60 seconds before next extraction cycle
