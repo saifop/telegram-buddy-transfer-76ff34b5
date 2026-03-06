@@ -74,6 +74,7 @@ export function MonitoringPanel({ accounts }: MonitoringPanelProps) {
     uptime?: number;
     connectedAccounts?: number;
     errors?: string[];
+    groups?: string | string[];
   } | null>(null);
 
   const connectedAccounts = accounts.filter(
