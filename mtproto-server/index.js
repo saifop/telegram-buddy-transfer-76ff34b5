@@ -1051,10 +1051,32 @@ async function handleAddMemberToGroup({ sessionString, groupLink, userId, userna
           return res.json({ success: false, error: reason });
         }
         
-        // Verify addition by checking updates
-        const hasUpdates = result && (result.updates?.length > 0 || result.chats?.length > 0 || result.users?.length > 0);
-        if (!hasUpdates && !isChat) {
-          console.log(`[ADD] ⚠️ No updates returned for ${username || userId}, may not be added`);
+        // === POST-ADD VERIFICATION: Check if user is actually in the group ===
+        if (!isChat) {
+          try {
+            await new Promise(r => setTimeout(r, 2000)); // Wait for Telegram to process
+            const participant = await client.invoke(
+              new Api.channels.GetParticipant({
+                channel: targetEntity,
+                participant: inputUser,
+              })
+            );
+            if (!participant || !participant.participant) {
+              console.log(`[ADD] ❌ Verification FAILED: ${username || userId} not found in group after invite`);
+              await client.disconnect();
+              return res.json({ success: false, error: 'فشل التحقق - لم يتم إضافة العضو فعلياً' });
+            }
+            console.log(`[ADD] ✅ Verified: ${username || userId} is in ${targetEntity.title}`);
+          } catch (verifyErr) {
+            const vm = verifyErr.message || '';
+            if (vm.includes('USER_NOT_PARTICIPANT')) {
+              console.log(`[ADD] ❌ Verification: ${username || userId} USER_NOT_PARTICIPANT after invite`);
+              await client.disconnect();
+              return res.json({ success: false, error: 'فشل الإضافة - العضو لم يُضف فعلياً (قيود خصوصية)' });
+            }
+            // If verification itself fails (e.g. CHAT_ADMIN_REQUIRED), still report success cautiously
+            console.log(`[ADD] ⚠️ Could not verify: ${vm}, assuming success`);
+          }
         }
         
         await client.disconnect();
