@@ -1991,8 +1991,20 @@ async function runBatchAddJob(job) {
         let addOk = false;
         for (let att = 0; att <= 3; att++) {
           try {
-            if (isChat) { await client.invoke(new Api.messages.AddChatUser({ chatId: targetEntity.id, userId: inputUser, fwdLimit: 100 })); }
-            else { await client.invoke(new Api.channels.InviteToChannel({ channel: targetEntity, users: [inputUser] })); }
+            let addResult;
+            if (isChat) { addResult = await client.invoke(new Api.messages.AddChatUser({ chatId: targetEntity.id, userId: inputUser, fwdLimit: 100 })); }
+            else { addResult = await client.invoke(new Api.channels.InviteToChannel({ channel: targetEntity, users: [inputUser] })); }
+            
+            // Check missingInvitees for silent failures
+            if (addResult && addResult.missingInvitees && addResult.missingInvitees.length > 0) {
+              const missed = addResult.missingInvitees[0];
+              const reason = missed.premiumWouldAllowInvite ? 'يحتاج Premium' :
+                             missed.premiumRequiredForPm ? 'يحتاج Premium للتواصل' :
+                             'خصوصية المستخدم';
+              member.status='skipped'; member.error=reason; job.skippedCount++;
+              addJobLog(job,'info',`⏭️ ${memberLabel}: ${reason}`,account.phone);
+              memberDone=true; break;
+            }
             addOk = true; break;
           } catch (err) {
             const em = err.message || '';
