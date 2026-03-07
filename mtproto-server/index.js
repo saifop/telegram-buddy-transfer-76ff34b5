@@ -2038,6 +2038,29 @@ async function runBatchAddJob(job) {
               addJobLog(job,'info',`⏭️ ${memberLabel}: ${reason}`,account.phone);
               memberDone=true; break;
             }
+            
+            // === POST-ADD VERIFICATION ===
+            if (!isChat) {
+              try {
+                await sleep(2000); // Wait for Telegram to process
+                const verifyResult = await client.invoke(
+                  new Api.channels.GetParticipant({ channel: targetEntity, participant: inputUser })
+                );
+                if (!verifyResult || !verifyResult.participant) {
+                  member.status='failed'; member.error='لم يُضف فعلياً'; job.failedCount++;
+                  addJobLog(job,'error',`❌ ${memberLabel}: فشل التحقق - لم يُضف فعلياً`,account.phone);
+                  memberDone=true; break;
+                }
+              } catch (vErr) {
+                const vm = vErr.message || '';
+                if (vm.includes('USER_NOT_PARTICIPANT')) {
+                  member.status='failed'; member.error='لم يُضف فعلياً'; job.failedCount++;
+                  addJobLog(job,'error',`❌ ${memberLabel}: لم يُضف فعلياً (خصوصية)`,account.phone);
+                  memberDone=true; break;
+                }
+                // Can't verify, assume success
+              }
+            }
             addOk = true; break;
           } catch (err) {
             const em = err.message || '';
