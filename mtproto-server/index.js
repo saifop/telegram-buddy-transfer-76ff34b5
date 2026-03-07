@@ -1587,44 +1587,49 @@ async function handleStartMonitoring({ accounts, groups, sessionId, supabaseUrl,
               }
             }
 
-            // === Fallback: Extract from message history ===
-            if (adminBlockedGroups.has(title)) {
-              try {
-                console.log(`[Monitor ${sessionId}] Using message history for "${title}"...`);
-                const messages = await client.getMessages(entity, { limit: 100 });
-                const seenUsers = new Set();
-                for (const msg of messages) {
-                  if (!msg.senderId) continue;
-                  const uid = msg.senderId.toString();
-                  if (seenUsers.has(uid)) continue;
-                  seenUsers.add(uid);
-                  
-                  try {
-                    const sender = await msg.getSender();
-                    if (!sender || sender.bot) continue;
-                    const stored = await storeMember({
-                      session_id: sessionId,
-                      telegram_user_id: uid,
-                      username: sender.username || null,
-                      first_name: sender.firstName || null,
-                      last_name: sender.lastName || null,
-                      access_hash: sender.accessHash ? sender.accessHash.toString() : null,
-                      source_group: title,
-                      message_text: (msg.text || '').substring(0, 200),
-                    });
-                    if (stored) extractedCount++;
-                  } catch (senderErr) {
-                    // Skip if can't resolve sender
-                  }
+            // === ALWAYS also extract from message history (catches recent active users) ===
+            try {
+              const msgLimit = adminBlockedGroups.has(title) ? 200 : 100;
+              console.log(`[Monitor ${sessionId}] Extracting from message history for "${title}" (limit=${msgLimit})...`);
+              const messages = await client.getMessages(entity, { limit: msgLimit });
+              const seenUsers = new Set();
+              let msgExtracted = 0;
+              for (const msg of messages) {
+                if (!msg.senderId) continue;
+                const uid = msg.senderId.toString();
+                if (seenUsers.has(uid)) continue;
+                seenUsers.add(uid);
+                
+                try {
+                  const sender = await msg.getSender();
+                  if (!sender || sender.bot) continue;
+                  const stored = await storeMember({
+                    session_id: sessionId,
+                    telegram_user_id: uid,
+                    username: sender.username || null,
+                    first_name: sender.firstName || null,
+                    last_name: sender.lastName || null,
+                    access_hash: sender.accessHash ? sender.accessHash.toString() : null,
+                    source_group: title,
+                    message_text: (msg.text || '').substring(0, 200),
+                  });
+                  if (stored) { extractedCount++; msgExtracted++; }
+                } catch (senderErr) {
+                  // Skip if can't resolve sender
                 }
-              } catch (histErr) {
-                const hm = histErr.message || '';
-                if (hm.includes('TIMEOUT')) {
-                  console.log(`[Monitor ${sessionId}] TIMEOUT on message history "${title}", skip`);
-                  await new Promise(r => setTimeout(r, 5000));
-                } else {
-                  console.log(`[Monitor ${sessionId}] Message history error for "${title}": ${hm}`);
-                }
+              }
+              if (msgExtracted > 0) console.log(`[Monitor ${sessionId}] Message history for "${title}": ${msgExtracted} new members`);
+            } catch (histErr) {
+              const hm = histErr.message || '';
+              if (hm.includes('TIMEOUT')) {
+                console.log(`[Monitor ${sessionId}] TIMEOUT on message history "${title}", skip`);
+                await new Promise(r => setTimeout(r, 5000));
+              } else if (hm.includes('FLOOD')) {
+                const ws = parseInt((hm.match(/(\d+)/) || [])[1]) || 10;
+                console.log(`[Monitor ${sessionId}] FLOOD on message history "${title}", wait ${ws}s`);
+                await new Promise(r => setTimeout(r, (ws + 2) * 1000));
+              } else {
+                console.log(`[Monitor ${sessionId}] Message history error for "${title}": ${hm}`);
               }
             }
 
