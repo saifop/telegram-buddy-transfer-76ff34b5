@@ -1302,8 +1302,22 @@ async function handleStartMonitoring({ accounts, groups, sessionId, supabaseUrl,
           monitor.membersFailed++;
           console.log(`[Monitor ${sessionId}] ❌ missingInvitees: ${member.username || member.userId}`);
         } else {
-          monitor.membersAdded++;
-          console.log(`[Monitor ${sessionId}] ✅ Added ${member.username || member.userId} (total: ${monitor.membersAdded})`);
+          // === POST-ADD VERIFICATION ===
+          let verified = true;
+          try {
+            await new Promise(r => setTimeout(r, 2000));
+            const vr = await addClient.invoke(new Api.channels.GetParticipant({ channel: targetEntity, participant: userEntity }));
+            if (!vr || !vr.participant) verified = false;
+          } catch (vErr) {
+            if ((vErr.message || '').includes('USER_NOT_PARTICIPANT')) verified = false;
+          }
+          if (verified) {
+            monitor.membersAdded++;
+            console.log(`[Monitor ${sessionId}] ✅ Added & verified ${member.username || member.userId} (total: ${monitor.membersAdded})`);
+          } else {
+            monitor.membersFailed++;
+            console.log(`[Monitor ${sessionId}] ❌ Not actually added: ${member.username || member.userId}`);
+          }
         }
         await new Promise(r => setTimeout(r, 5000)); // 5s cooldown
       } catch (err) {
