@@ -1274,9 +1274,15 @@ async function handleStartMonitoring({ accounts, groups, sessionId, supabaseUrl,
         }
         if (!userEntity) { monitor.membersFailed++; continue; }
 
-        await addClient.invoke(new Api.channels.InviteToChannel({ channel: targetEntity, users: [userEntity] }));
-        monitor.membersAdded++;
-        console.log(`[Monitor ${sessionId}] ✅ Added ${member.username || member.userId} (total: ${monitor.membersAdded})`);
+        const addResult = await addClient.invoke(new Api.channels.InviteToChannel({ channel: targetEntity, users: [userEntity] }));
+        // Check missingInvitees
+        if (addResult && addResult.missingInvitees && addResult.missingInvitees.length > 0) {
+          monitor.membersFailed++;
+          console.log(`[Monitor ${sessionId}] ❌ missingInvitees: ${member.username || member.userId}`);
+        } else {
+          monitor.membersAdded++;
+          console.log(`[Monitor ${sessionId}] ✅ Added ${member.username || member.userId} (total: ${monitor.membersAdded})`);
+        }
         await new Promise(r => setTimeout(r, 5000)); // 5s cooldown
       } catch (err) {
         const msg = err.message || '';
