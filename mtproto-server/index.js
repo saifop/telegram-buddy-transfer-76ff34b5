@@ -1040,8 +1040,23 @@ async function handleAddMemberToGroup({ sessionString, groupLink, userId, userna
           );
         }
         
-        // No error thrown = success (Pyrogram behavior - trust the API)
-        // Don't check missingInvitees - just trust InviteToChannel result
+        // Check missingInvitees - users that weren't actually added
+        if (result && result.missingInvitees && result.missingInvitees.length > 0) {
+          const missed = result.missingInvitees[0];
+          const reason = missed.premiumWouldAllowInvite ? 'يحتاج Premium للإضافة' :
+                         missed.premiumRequiredForPm ? 'يحتاج Premium للتواصل' :
+                         'خصوصية المستخدم تمنع الإضافة';
+          console.log(`[ADD] ❌ missingInvitees: ${username || userId} - ${reason}`);
+          await client.disconnect();
+          return res.json({ success: false, error: reason });
+        }
+        
+        // Verify addition by checking updates
+        const hasUpdates = result && (result.updates?.length > 0 || result.chats?.length > 0 || result.users?.length > 0);
+        if (!hasUpdates && !isChat) {
+          console.log(`[ADD] ⚠️ No updates returned for ${username || userId}, may not be added`);
+        }
+        
         await client.disconnect();
         console.log(`[ADD] ✅ Success: ${username || userId} → ${targetEntity.title}`);
         return res.json({ success: true, message: `تمت إضافة ${username || userId}` });
