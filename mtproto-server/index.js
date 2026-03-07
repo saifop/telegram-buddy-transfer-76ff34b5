@@ -38,7 +38,7 @@ app.get('/', (req, res) => {
   res.json({ 
     status: 'ok', 
     message: 'Telegram MTProto Server is running',
-    version: '2.6.0',
+    version: '2.7.0',
     activeMonitors: activeMonitors.size,
     activeBatchJobs: activeBatchJobs.size,
     uptime: Math.floor(process.uptime()),
@@ -1051,10 +1051,32 @@ async function handleAddMemberToGroup({ sessionString, groupLink, userId, userna
           return res.json({ success: false, error: reason });
         }
         
-        // Verify addition by checking updates
-        const hasUpdates = result && (result.updates?.length > 0 || result.chats?.length > 0 || result.users?.length > 0);
-        if (!hasUpdates && !isChat) {
-          console.log(`[ADD] ⚠️ No updates returned for ${username || userId}, may not be added`);
+        // === POST-ADD VERIFICATION: Check if user is actually in the group ===
+        if (!isChat) {
+          try {
+            await new Promise(r => setTimeout(r, 2000)); // Wait for Telegram to process
+            const participant = await client.invoke(
+              new Api.channels.GetParticipant({
+                channel: targetEntity,
+                participant: inputUser,
+              })
+            );
+            if (!participant || !participant.participant) {
+              console.log(`[ADD] ❌ Verification FAILED: ${username || userId} not found in group after invite`);
+              await client.disconnect();
+              return res.json({ success: false, error: 'فشل التحقق - لم يتم إضافة العضو فعلياً' });
+            }
+            console.log(`[ADD] ✅ Verified: ${username || userId} is in ${targetEntity.title}`);
+          } catch (verifyErr) {
+            const vm = verifyErr.message || '';
+            if (vm.includes('USER_NOT_PARTICIPANT')) {
+              console.log(`[ADD] ❌ Verification: ${username || userId} USER_NOT_PARTICIPANT after invite`);
+              await client.disconnect();
+              return res.json({ success: false, error: 'فشل الإضافة - العضو لم يُضف فعلياً (قيود خصوصية)' });
+            }
+            // If verification itself fails (e.g. CHAT_ADMIN_REQUIRED), still report success cautiously
+            console.log(`[ADD] ⚠️ Could not verify: ${vm}, assuming success`);
+          }
         }
         
         await client.disconnect();
@@ -1280,8 +1302,22 @@ async function handleStartMonitoring({ accounts, groups, sessionId, supabaseUrl,
           monitor.membersFailed++;
           console.log(`[Monitor ${sessionId}] ❌ missingInvitees: ${member.username || member.userId}`);
         } else {
-          monitor.membersAdded++;
-          console.log(`[Monitor ${sessionId}] ✅ Added ${member.username || member.userId} (total: ${monitor.membersAdded})`);
+          // === POST-ADD VERIFICATION ===
+          let verified = true;
+          try {
+            await new Promise(r => setTimeout(r, 2000));
+            const vr = await addClient.invoke(new Api.channels.GetParticipant({ channel: targetEntity, participant: userEntity }));
+            if (!vr || !vr.participant) verified = false;
+          } catch (vErr) {
+            if ((vErr.message || '').includes('USER_NOT_PARTICIPANT')) verified = false;
+          }
+          if (verified) {
+            monitor.membersAdded++;
+            console.log(`[Monitor ${sessionId}] ✅ Added & verified ${member.username || member.userId} (total: ${monitor.membersAdded})`);
+          } else {
+            monitor.membersFailed++;
+            console.log(`[Monitor ${sessionId}] ❌ Not actually added: ${member.username || member.userId}`);
+          }
         }
         await new Promise(r => setTimeout(r, 5000)); // 5s cooldown
       } catch (err) {
@@ -2015,6 +2051,29 @@ async function runBatchAddJob(job) {
               member.status='skipped'; member.error=reason; job.skippedCount++;
               addJobLog(job,'info',`⏭️ ${memberLabel}: ${reason}`,account.phone);
               memberDone=true; break;
+            }
+            
+            // === POST-ADD VERIFICATION ===
+            if (!isChat) {
+              try {
+                await sleep(2000); // Wait for Telegram to process
+                const verifyResult = await client.invoke(
+                  new Api.channels.GetParticipant({ channel: targetEntity, participant: inputUser })
+                );
+                if (!verifyResult || !verifyResult.participant) {
+                  member.status='failed'; member.error='لم يُضف فعلياً'; job.failedCount++;
+                  addJobLog(job,'error',`❌ ${memberLabel}: فشل التحقق - لم يُضف فعلياً`,account.phone);
+                  memberDone=true; break;
+                }
+              } catch (vErr) {
+                const vm = vErr.message || '';
+                if (vm.includes('USER_NOT_PARTICIPANT')) {
+                  member.status='failed'; member.error='لم يُضف فعلياً'; job.failedCount++;
+                  addJobLog(job,'error',`❌ ${memberLabel}: لم يُضف فعلياً (خصوصية)`,account.phone);
+                  memberDone=true; break;
+                }
+                // Can't verify, assume success
+              }
             }
             addOk = true; break;
           } catch (err) {
