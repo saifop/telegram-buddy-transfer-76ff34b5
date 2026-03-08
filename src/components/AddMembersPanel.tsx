@@ -92,6 +92,7 @@ export function AddMembersPanel({
     rotateAccounts: true,
     maxRetries: 2,
     cooldownAfterFlood: 300,
+    retryCycles: 0,
   });
 
   // Multiple source groups for auto mode
