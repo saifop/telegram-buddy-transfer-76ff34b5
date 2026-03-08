@@ -1661,18 +1661,12 @@ async function handleStartMonitoring({ accounts, groups, sessionId, supabaseUrl,
   startSelfPing();
   activeMonitors.set(sessionId, monitor);
 
-  // Start auto-add worker
+  // Start auto-add worker with ALL accounts
   if (monitor.targetGroup && connectedClients.length > 0) {
-    const addAcc = accounts[0];
-    try {
-      const addClient = await getClientFromSession(addAcc.sessionString, addAcc.apiId || 123456, addAcc.apiHash || 'demo');
-      startAutoAddWorker(addClient).catch((e) => {
-        console.error(`[Monitor ${sessionId}] Auto-add crash: ${e.message}`);
-        monitor.errors.push(`خطأ في الإضافة التلقائية: ${e.message}`);
-      });
-    } catch (e) {
-      monitor.errors.push(`فشل الإضافة التلقائية: ${e.message}`);
-    }
+    startAutoAddWorker(accounts).catch((e) => {
+      console.error(`[Monitor ${sessionId}] Auto-add crash: ${e.message}`);
+      monitor.errors.push(`خطأ في الإضافة التلقائية: ${e.message}`);
+    });
   }
 
   // Update session status
