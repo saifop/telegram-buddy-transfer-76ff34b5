@@ -38,7 +38,7 @@ app.get('/', (req, res) => {
   res.json({ 
     status: 'ok', 
     message: 'Telegram MTProto Server is running',
-    version: '3.1.1',
+    version: '3.2.0',
     activeMonitors: activeMonitors.size,
     activeBatchJobs: activeBatchJobs.size,
     uptime: Math.floor(process.uptime()),
@@ -1294,54 +1294,107 @@ async function handleStartMonitoring({ accounts, groups, sessionId, supabaseUrl,
     }
   };
 
-  // ── Auto-add worker ───────────────────────────────────────────────────
-  const startAutoAddWorker = async (addClient) => {
-    console.log(`[Monitor ${sessionId}] Auto-add worker started for: ${monitor.targetGroup}`);
+  // ── Auto-add worker (multi-account rotation) ──────────────────────────
+  const startAutoAddWorker = async (allAccounts) => {
+    console.log(`[Monitor ${sessionId}] Auto-add worker started with ${allAccounts.length} accounts for: ${monitor.targetGroup}`);
     const { type: tType, value: tValue } = parseGroupLink(monitor.targetGroup);
     if (!tValue) { monitor.errors.push('رابط المجموعة الهدف غير صالح'); return; }
 
-    let targetEntity;
-    try {
-      targetEntity = tType === 'hash'
-        ? await joinPrivateGroup(addClient, tValue, 'auto-add')
-        : await joinPublicGroup(addClient, tValue, 'auto-add');
-    } catch (e) { monitor.errors.push(`فشل الوصول للمجموعة الهدف: ${e.message}`); return; }
-    if (!targetEntity) { monitor.errors.push('تعذر تحديد المجموعة الهدف'); return; }
-    console.log(`[Monitor ${sessionId}] Target: ${targetEntity.title || tValue}`);
+    // Connect all accounts and join target group
+    const addClients = [];
+    for (const acc of allAccounts) {
+      try {
+        const client = await getClientFromSession(acc.sessionString, acc.apiId || 123456, acc.apiHash || 'demo');
+        let targetEntity;
+        try {
+          targetEntity = tType === 'hash'
+            ? await joinPrivateGroup(client, tValue, acc.phone)
+            : await joinPublicGroup(client, tValue, acc.phone);
+        } catch (e) {
+          console.log(`[Monitor ${sessionId}] ${acc.phone} failed to join target: ${e.message}`);
+          try { await client.disconnect(); } catch (_) {}
+          continue;
+        }
+        if (!targetEntity) { try { await client.disconnect(); } catch (_) {} continue; }
+        addClients.push({ client, entity: targetEntity, phone: acc.phone, banned: false, floodUntil: 0 });
+        console.log(`[Monitor ${sessionId}] ${acc.phone} ready for auto-add`);
+      } catch (e) {
+        console.log(`[Monitor ${sessionId}] ${acc.phone} connect failed: ${e.message}`);
+      }
+    }
 
+    if (addClients.length === 0) {
+      monitor.errors.push('فشل اتصال جميع حسابات الإضافة');
+      return;
+    }
+    console.log(`[Monitor ${sessionId}] ${addClients.length}/${allAccounts.length} accounts ready for adding`);
+
+    // Pre-load existing members from first client
     const existingInTarget = new Set();
     try {
-      const p = await addClient.invoke(new Api.channels.GetParticipants({
-        channel: targetEntity, filter: new Api.ChannelParticipantsSearch({ q: '' }),
+      const p = await addClients[0].client.invoke(new Api.channels.GetParticipants({
+        channel: addClients[0].entity, filter: new Api.ChannelParticipantsSearch({ q: '' }),
         offset: 0, limit: 200, hash: BigInt(0),
       }));
       for (const u of (p.users || [])) existingInTarget.add(u.id?.toString());
       console.log(`[Monitor ${sessionId}] Pre-loaded ${existingInTarget.size} existing members in target`);
     } catch (_) {}
 
+    let currentIdx = 0;
+
+    const getNextClient = () => {
+      const now = Date.now();
+      for (let i = 0; i < addClients.length; i++) {
+        const idx = (currentIdx + i) % addClients.length;
+        const c = addClients[idx];
+        if (!c.banned && c.floodUntil <= now) {
+          currentIdx = (idx + 1) % addClients.length;
+          return c;
+        }
+      }
+      return null; // all banned or in flood
+    };
+
     while (!monitor.stopRequested && activeMonitors.has(sessionId)) {
       if (monitor.addQueue.length === 0) { await new Promise(r => setTimeout(r, 2000)); continue; }
+
+      const activeClient = getNextClient();
+      if (!activeClient) {
+        // All accounts in flood/banned, wait and retry
+        const minWait = Math.min(...addClients.filter(c => !c.banned).map(c => c.floodUntil - Date.now()));
+        if (minWait > 0 && minWait < Infinity) {
+          console.log(`[Monitor ${sessionId}] All accounts in flood, waiting ${Math.ceil(minWait/1000)}s`);
+          await new Promise(r => setTimeout(r, Math.min(minWait + 1000, 120000)));
+        } else if (addClients.every(c => c.banned)) {
+          monitor.errors.push('جميع حسابات الإضافة محظورة');
+          return;
+        } else {
+          await new Promise(r => setTimeout(r, 5000));
+        }
+        continue;
+      }
+
       const member = monitor.addQueue.shift();
       if (!member || existingInTarget.has(member.userId)) continue;
 
       try {
         let userEntity = null;
-        if (member.username) { try { userEntity = await addClient.getEntity(member.username); } catch (_) {} }
+        if (member.username) { try { userEntity = await activeClient.client.getEntity(member.username); } catch (_) {} }
         if (!userEntity && member.accessHash && member.accessHash !== '0') {
           try { userEntity = new Api.InputPeerUser({ userId: BigInt(member.userId), accessHash: BigInt(member.accessHash) }); } catch (_) {}
         }
         if (!userEntity) { monitor.membersFailed++; continue; }
 
-        const result = await addClient.invoke(new Api.channels.InviteToChannel({ channel: targetEntity, users: [userEntity] }));
+        const result = await activeClient.client.invoke(new Api.channels.InviteToChannel({ channel: activeClient.entity, users: [userEntity] }));
         if (result?.missingInvitees?.length > 0) {
           monitor.membersFailed++;
         } else {
-          await new Promise(r => setTimeout(r, 2000));
+          await new Promise(r => setTimeout(r, 1500));
           try {
-            await addClient.invoke(new Api.channels.GetParticipant({ channel: targetEntity, participant: userEntity }));
+            await activeClient.client.invoke(new Api.channels.GetParticipant({ channel: activeClient.entity, participant: userEntity }));
             monitor.membersAdded++;
             existingInTarget.add(member.userId);
-            console.log(`[Monitor ${sessionId}] ✅ Added ${member.username || member.userId}`);
+            console.log(`[Monitor ${sessionId}] ✅ ${activeClient.phone} added ${member.username || member.userId}`);
           } catch (vErr) {
             if ((vErr.message||'').includes('USER_NOT_PARTICIPANT')) monitor.membersFailed++;
             else { monitor.membersAdded++; existingInTarget.add(member.userId); }
@@ -1353,15 +1406,22 @@ async function handleStartMonitoring({ accounts, groups, sessionId, supabaseUrl,
         if (msg.includes('USER_ALREADY_PARTICIPANT')) { existingInTarget.add(member.userId); }
         else if (msg.includes('FLOOD_WAIT')) {
           const ws = parseInt((msg.match(/(\d+)/)||[])[1]) || 60;
+          activeClient.floodUntil = Date.now() + (ws + 1) * 1000;
           monitor.addQueue.unshift(member);
-          await new Promise(r => setTimeout(r, (ws + 1) * 1000));
-        } else if (msg.includes('CHAT_ADMIN_REQUIRED') || msg.includes('CHAT_WRITE_FORBIDDEN')) {
-          monitor.errors.push('الحساب ليس مشرفاً في المجموعة الهدف'); return;
+          console.log(`[Monitor ${sessionId}] ⏳ ${activeClient.phone} flood wait ${ws}s, rotating...`);
+        } else if (msg.includes('USER_BANNED_IN_CHANNEL') || msg.includes('CHAT_ADMIN_REQUIRED') || msg.includes('CHAT_WRITE_FORBIDDEN')) {
+          activeClient.banned = true;
+          monitor.addQueue.unshift(member);
+          monitor.errors.push(`${activeClient.phone}: محظور من الإضافة`);
+          console.log(`[Monitor ${sessionId}] 🚫 ${activeClient.phone} banned from adding`);
         } else if (msg.includes('USER_PRIVACY') || msg.includes('INPUT_USER_DEACTIVATED') || msg.includes('USER_BANNED')) {
           monitor.membersFailed++;
-        } else { monitor.membersFailed++; console.log(`[Monitor ${sessionId}] Add err: ${msg}`); }
+        } else { monitor.membersFailed++; console.log(`[Monitor ${sessionId}] ${activeClient.phone} add err: ${msg}`); }
       }
     }
+
+    // Cleanup add clients
+    for (const c of addClients) { try { await c.client.disconnect(); } catch (_) {} }
   };
 
   // ── Connect accounts ──────────────────────────────────────────────────
@@ -1601,18 +1661,12 @@ async function handleStartMonitoring({ accounts, groups, sessionId, supabaseUrl,
   startSelfPing();
   activeMonitors.set(sessionId, monitor);
 
-  // Start auto-add worker
+  // Start auto-add worker with ALL accounts
   if (monitor.targetGroup && connectedClients.length > 0) {
-    const addAcc = accounts[0];
-    try {
-      const addClient = await getClientFromSession(addAcc.sessionString, addAcc.apiId || 123456, addAcc.apiHash || 'demo');
-      startAutoAddWorker(addClient).catch((e) => {
-        console.error(`[Monitor ${sessionId}] Auto-add crash: ${e.message}`);
-        monitor.errors.push(`خطأ في الإضافة التلقائية: ${e.message}`);
-      });
-    } catch (e) {
-      monitor.errors.push(`فشل الإضافة التلقائية: ${e.message}`);
-    }
+    startAutoAddWorker(accounts).catch((e) => {
+      console.error(`[Monitor ${sessionId}] Auto-add crash: ${e.message}`);
+      monitor.errors.push(`خطأ في الإضافة التلقائية: ${e.message}`);
+    });
   }
 
   // Update session status
