@@ -1165,7 +1165,7 @@ async function handleAddMemberToGroup({ sessionString, groupLink, userId, userna
  * Monitoring v3 — focused on real-time message capture from private groups.
  * Every sender is stored once per session (dedup via in-memory Set + DB unique constraint).
  */
-async function handleStartMonitoring({ accounts, groups, sessionId, supabaseUrl, supabaseKey, targetGroup, monitorAll }, res) {
+async function handleStartMonitoring({ accounts, addAccounts, groups, sessionId, supabaseUrl, supabaseKey, targetGroup, monitorAll }, res) {
   if (!accounts || !accounts.length || !sessionId || !supabaseUrl || !supabaseKey) {
     return res.status(400).json({ error: 'Missing required parameters' });
   }

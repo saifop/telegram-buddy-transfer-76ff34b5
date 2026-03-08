@@ -233,6 +233,16 @@ export function MonitoringPanel({ accounts }: MonitoringPanelProps) {
           apiHash: a!.apiHash,
         }));
 
+      // All connected accounts EXCEPT selected extraction accounts → for auto-add
+      const addAccountsData = connectedAccounts
+        .filter((a) => !selectedAccounts.has(a.id))
+        .map((a) => ({
+          phone: a.phone,
+          sessionString: a.sessionString,
+          apiId: a.apiId,
+          apiHash: a.apiHash,
+        }));
+
       const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
       const supabaseKey = import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY;
 
@@ -240,6 +250,7 @@ export function MonitoringPanel({ accounts }: MonitoringPanelProps) {
         body: {
           action: "startMonitoring",
           accounts: accountsData,
+          addAccounts: addAccountsData,
           groups: monitorAll ? [] : validGroups,
           monitorAll,
           sessionId: session.id,
