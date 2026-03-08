@@ -38,7 +38,7 @@ app.get('/', (req, res) => {
   res.json({ 
     status: 'ok', 
     message: 'Telegram MTProto Server is running',
-    version: '3.2.0',
+    version: '3.3.0',
     activeMonitors: activeMonitors.size,
     activeBatchJobs: activeBatchJobs.size,
     uptime: Math.floor(process.uptime()),
@@ -1165,7 +1165,7 @@ async function handleAddMemberToGroup({ sessionString, groupLink, userId, userna
  * Monitoring v3 — focused on real-time message capture from private groups.
  * Every sender is stored once per session (dedup via in-memory Set + DB unique constraint).
  */
-async function handleStartMonitoring({ accounts, groups, sessionId, supabaseUrl, supabaseKey, targetGroup, monitorAll }, res) {
+async function handleStartMonitoring({ accounts, addAccounts, groups, sessionId, supabaseUrl, supabaseKey, targetGroup, monitorAll }, res) {
   if (!accounts || !accounts.length || !sessionId || !supabaseUrl || !supabaseKey) {
     return res.status(400).json({ error: 'Missing required parameters' });
   }
@@ -1192,7 +1192,7 @@ async function handleStartMonitoring({ accounts, groups, sessionId, supabaseUrl,
     knownUserIds: new Set(), // in-memory dedup across ALL accounts
   };
 
-  console.log(`[Monitor ${sessionId}] v3 Starting — ${monitorAll ? 'ALL groups' : `${(groups || []).length} groups`} — ${accounts.length} accounts`);
+  console.log(`[Monitor ${sessionId}] v3.3 Starting — ${monitorAll ? 'ALL groups' : `${(groups || []).length} groups`} — ${accounts.length} extraction accounts, ${(addAccounts || []).length} add accounts`);
 
   // ── storeMember: dedup in-memory first, then DB ───────────────────────
   const storeMember = async (memberData) => {
@@ -1661,12 +1661,16 @@ async function handleStartMonitoring({ accounts, groups, sessionId, supabaseUrl,
   startSelfPing();
   activeMonitors.set(sessionId, monitor);
 
-  // Start auto-add worker with ALL accounts
-  if (monitor.targetGroup && connectedClients.length > 0) {
-    startAutoAddWorker(accounts).catch((e) => {
+  // Start auto-add worker with dedicated add accounts (excluding extraction accounts)
+  const autoAddAccounts = addAccounts && addAccounts.length > 0 ? addAccounts : [];
+  if (monitor.targetGroup && autoAddAccounts.length > 0) {
+    startAutoAddWorker(autoAddAccounts).catch((e) => {
       console.error(`[Monitor ${sessionId}] Auto-add crash: ${e.message}`);
       monitor.errors.push(`خطأ في الإضافة التلقائية: ${e.message}`);
     });
+  } else if (monitor.targetGroup && autoAddAccounts.length === 0) {
+    console.log(`[Monitor ${sessionId}] No add accounts provided, auto-add disabled`);
+    monitor.errors.push('لا توجد حسابات إضافة متاحة (جميع الحسابات مخصصة للاستخراج)');
   }
 
   // Update session status
