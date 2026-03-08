@@ -1479,17 +1479,23 @@ async function handleStartMonitoring({ accounts, groups, sessionId, supabaseUrl,
       connectedClients.push({ client, phone: account.phone, handler });
       console.log(`[Monitor ${sessionId}] ${account.phone} listening to ${resolvedEntities.length} groups in real-time`);
 
-      // ── Background: one-time history scan (300 msgs per group) ──────
+      // ── Background: CONTINUOUS history scan (loops forever) ──────
       (async () => {
-        try {
+        let cycleNum = 0;
+        while (!monitor.stopRequested && activeMonitors.has(sessionId)) {
+          cycleNum++;
+          console.log(`[Monitor ${sessionId}] 📜 History scan cycle #${cycleNum} — ${resolvedEntities.length} groups`);
+          let cycleTotalNew = 0;
+
           for (const { entity, title } of resolvedEntities) {
-            if (monitor.stopRequested) return;
-            console.log(`[Monitor ${sessionId}] 📜 Scanning history of "${title}"...`);
+            if (monitor.stopRequested || !activeMonitors.has(sessionId)) break;
+
             let scanned = 0;
             try {
-              const messages = await client.getMessages(entity, { limit: 300 });
+              // Scan last 500 messages each cycle
+              const messages = await client.getMessages(entity, { limit: 500 });
               for (const msg of messages) {
-                if (monitor.stopRequested) return;
+                if (monitor.stopRequested) break;
                 if (!msg.senderId) continue;
                 const uid = msg.senderId.toString();
                 if (monitor.knownUserIds.has(uid)) continue;
@@ -1510,21 +1516,66 @@ async function handleStartMonitoring({ accounts, groups, sessionId, supabaseUrl,
                   if (stored) scanned++;
                 } catch (_) {}
               }
-              console.log(`[Monitor ${sessionId}] 📜 "${title}": ${scanned} new members from history`);
+              if (scanned > 0) console.log(`[Monitor ${sessionId}] 📜 "${title}": +${scanned} new members`);
+              cycleTotalNew += scanned;
             } catch (histErr) {
               const hm = histErr.message || '';
               if (hm.includes('FLOOD')) {
-                const ws = parseInt((hm.match(/(\d+)/)||[])[1]) || 15;
-                await new Promise(r => setTimeout(r, (ws + 2) * 1000));
+                const ws = parseInt((hm.match(/(\d+)/)||[])[1]) || 30;
+                console.log(`[Monitor ${sessionId}] 📜 FLOOD_WAIT ${ws}s for "${title}", waiting...`);
+                await new Promise(r => setTimeout(r, (ws + 5) * 1000));
+              } else if (hm.includes('disconnected') || hm.includes('CONNECTION') || hm.includes('TIMEOUT')) {
+                console.log(`[Monitor ${sessionId}] 📜 Connection issue "${title}": ${hm}, reconnecting...`);
+                try { await client.connect(); } catch (reconErr) {
+                  console.error(`[Monitor ${sessionId}] Reconnect failed: ${reconErr.message}`);
+                  await new Promise(r => setTimeout(r, 10000));
+                }
               } else {
-                console.log(`[Monitor ${sessionId}] History error "${title}": ${hm}`);
+                console.log(`[Monitor ${sessionId}] 📜 History error "${title}": ${hm}`);
               }
             }
-            await new Promise(r => setTimeout(r, 2000));
+            // Delay between groups to avoid flood
+            await new Promise(r => setTimeout(r, 3000));
           }
-          console.log(`[Monitor ${sessionId}] 📜 History scan done. Total: ${monitor.membersFound}`);
-        } catch (e) {
-          console.error(`[Monitor ${sessionId}] History scan fatal: ${e.message}`);
+
+          console.log(`[Monitor ${sessionId}] 📜 Cycle #${cycleNum} done: +${cycleTotalNew} new, total: ${monitor.membersFound}`);
+
+          // Update DB count
+          try {
+            await fetch(`${supabaseUrl}/rest/v1/monitoring_sessions?id=eq.${sessionId}`, {
+              method: 'PATCH',
+              headers: { 'Content-Type': 'application/json', 'apikey': supabaseKey, 'Authorization': `Bearer ${supabaseKey}` },
+              body: JSON.stringify({ total_members_found: monitor.membersFound }),
+            });
+          } catch (_) {}
+
+          // Cooldown between cycles: 45 seconds
+          if (!monitor.stopRequested && activeMonitors.has(sessionId)) {
+            console.log(`[Monitor ${sessionId}] 📜 Waiting 45s before next cycle...`);
+            await new Promise(r => setTimeout(r, 45000));
+          }
+        }
+        console.log(`[Monitor ${sessionId}] 📜 Continuous history scan stopped.`);
+      })();
+
+      // ── Background: connection health check every 2 minutes ──────
+      (async () => {
+        while (!monitor.stopRequested && activeMonitors.has(sessionId)) {
+          await new Promise(r => setTimeout(r, 120000)); // 2 min
+          if (monitor.stopRequested || !activeMonitors.has(sessionId)) break;
+          try {
+            const me = await client.getMe();
+            if (me) console.log(`[Monitor ${sessionId}] 💓 ${account.phone} alive`);
+          } catch (e) {
+            console.log(`[Monitor ${sessionId}] 💔 ${account.phone} disconnected, reconnecting...`);
+            try {
+              await client.connect();
+              console.log(`[Monitor ${sessionId}] ✅ ${account.phone} reconnected`);
+            } catch (reconErr) {
+              console.error(`[Monitor ${sessionId}] ❌ ${account.phone} reconnect failed: ${reconErr.message}`);
+              monitor.errors.push(`انقطع اتصال ${account.phone}`);
+            }
+          }
         }
       })();
 
