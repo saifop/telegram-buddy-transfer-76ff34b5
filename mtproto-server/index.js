@@ -1481,8 +1481,12 @@ async function handleStartMonitoring({ accounts, groups, sessionId, supabaseUrl,
 
       // ── Background: CONTINUOUS history scan (loops forever) ──────
       (async () => {
+        // Wait for activeMonitors to be set before starting
+        while (!activeMonitors.has(sessionId) && !monitor.stopRequested) {
+          await new Promise(r => setTimeout(r, 500));
+        }
         let cycleNum = 0;
-        while (!monitor.stopRequested && activeMonitors.has(sessionId)) {
+        while (!monitor.stopRequested) {
           cycleNum++;
           console.log(`[Monitor ${sessionId}] 📜 History scan cycle #${cycleNum} — ${resolvedEntities.length} groups`);
           let cycleTotalNew = 0;
