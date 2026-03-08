@@ -192,6 +192,7 @@ export function useAddMembers({
             delayMax: settings.delayMax,
             maxRetries: settings.maxRetries,
             cooldownAfterFlood: settings.cooldownAfterFlood,
+            retryCycles: settings.retryCycles || 0,
           },
         },
       });
