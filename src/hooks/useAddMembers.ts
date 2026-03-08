@@ -14,6 +14,7 @@ interface AddSettings {
   rotateAccounts: boolean;
   maxRetries: number;
   cooldownAfterFlood: number;
+  retryCycles: number;
 }
 
 interface UseAddMembersProps {
