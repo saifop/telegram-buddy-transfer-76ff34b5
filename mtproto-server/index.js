@@ -1869,6 +1869,7 @@ async function handleStartBatchAdd({ accounts, members, targetGroup, sourceGroup
       delayMax: settings?.delayMax || 30,
       maxRetries: settings?.maxRetries || 2,
       cooldownAfterFlood: settings?.cooldownAfterFlood || 300,
+      retryCycles: settings?.retryCycles || 0,
     },
     startedAt: Date.now(),
     stopRequested: false,
@@ -1880,6 +1881,8 @@ async function handleStartBatchAdd({ accounts, members, targetGroup, sourceGroup
     skippedCount: 0,
     currentMember: null,
     currentAccount: null,
+    currentCycle: 1,
+    totalCycles: (settings?.retryCycles || 0) + 1,
     logs: [],
     bannedAccounts: new Set(),
     notAdminAccounts: new Set(),
@@ -1890,10 +1893,10 @@ async function handleStartBatchAdd({ accounts, members, targetGroup, sourceGroup
 
   activeBatchJobs.set(id, job);
   startSelfPing(); // Keep Railway alive during batch jobs
-  console.log(`[BatchAdd ${id}] Starting: ${members.length} members, ${accounts.length} accounts → ${targetGroup}`);
+  console.log(`[BatchAdd ${id}] Starting: ${members.length} members, ${accounts.length} accounts → ${targetGroup}, cycles: ${job.totalCycles}`);
 
   // Respond immediately
-  res.json({ success: true, jobId: id, message: `بدأت العملية: ${members.length} عضو` });
+  res.json({ success: true, jobId: id, message: `بدأت العملية: ${members.length} عضو، ${job.totalCycles} دورة` });
 
   // Run in background
   runBatchAddJob(job).catch(err => {
