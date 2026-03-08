@@ -1554,7 +1554,7 @@ async function handleStartMonitoring({ accounts, groups, sessionId, supabaseUrl,
           } catch (_) {}
 
           // Cooldown between cycles: 45 seconds
-          if (!monitor.stopRequested && activeMonitors.has(sessionId)) {
+          if (!monitor.stopRequested) {
             console.log(`[Monitor ${sessionId}] 📜 Waiting 45s before next cycle...`);
             await new Promise(r => setTimeout(r, 45000));
           }
