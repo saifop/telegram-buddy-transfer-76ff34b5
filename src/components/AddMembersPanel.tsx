@@ -65,6 +65,7 @@ export interface AddSettings {
   rotateAccounts: boolean;
   maxRetries: number;
   cooldownAfterFlood: number;
+  retryCycles: number;
 }
 
 export function AddMembersPanel({
