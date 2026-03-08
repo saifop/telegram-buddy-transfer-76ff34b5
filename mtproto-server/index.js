@@ -2236,6 +2236,7 @@ async function handleGetBatchAddStatus({ jobId }, res) {
       processed: job.processed, total: job.total,
       successCount: job.successCount, failedCount: job.failedCount, skippedCount: job.skippedCount,
       currentMember: job.currentMember, currentAccount: job.currentAccount,
+      currentCycle: job.currentCycle || 1, totalCycles: job.totalCycles || 1,
       uptime: Math.floor((Date.now() - job.startedAt) / 1000),
       logs: job.logs.slice(-50),
       members: job.members.map(m => ({ userId: m.userId, username: m.username, status: m.status, error: m.error })),
