@@ -1564,9 +1564,13 @@ async function handleStartMonitoring({ accounts, groups, sessionId, supabaseUrl,
 
       // ── Background: connection health check every 2 minutes ──────
       (async () => {
-        while (!monitor.stopRequested && activeMonitors.has(sessionId)) {
+        // Wait for activeMonitors to be set
+        while (!activeMonitors.has(sessionId) && !monitor.stopRequested) {
+          await new Promise(r => setTimeout(r, 500));
+        }
+        while (!monitor.stopRequested) {
           await new Promise(r => setTimeout(r, 120000)); // 2 min
-          if (monitor.stopRequested || !activeMonitors.has(sessionId)) break;
+          if (monitor.stopRequested) break;
           try {
             const me = await client.getMe();
             if (me) console.log(`[Monitor ${sessionId}] 💓 ${account.phone} alive`);
