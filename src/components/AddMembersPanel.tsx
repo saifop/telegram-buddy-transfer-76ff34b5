@@ -588,7 +588,7 @@ export function AddMembersPanel({
           {/* Max Retries */}
           <div className="space-y-2">
             <div className="flex items-center justify-between">
-              <Label className="text-xs text-muted-foreground">عدد المحاولات</Label>
+              <Label className="text-xs text-muted-foreground">عدد المحاولات لكل عضو</Label>
               <span className="text-sm font-medium">{settings.maxRetries}</span>
             </div>
             <Slider
@@ -599,6 +599,28 @@ export function AddMembersPanel({
               step={1}
             />
           </div>
+
+          {/* Retry Cycles */}
+          {!autoMode && (
+            <div className="space-y-2">
+              <div className="flex items-center justify-between">
+                <Label className="text-xs text-muted-foreground">
+                  🔄 دورات إعادة المحاولة (تكرار العملية)
+                </Label>
+                <span className="text-sm font-medium">{settings.retryCycles === 0 ? "بدون" : settings.retryCycles}</span>
+              </div>
+              <Slider
+                value={[settings.retryCycles]}
+                onValueChange={(v) => setSettings({ ...settings, retryCycles: v[0] })}
+                min={0}
+                max={10}
+                step={1}
+              />
+              <p className="text-xs text-muted-foreground">
+                بعد انتهاء الدورة الأولى، يعيد محاولة الأعضاء الفاشلين تلقائياً {settings.retryCycles > 0 ? `(${settings.retryCycles + 1} دورة إجمالاً)` : ""}
+              </p>
+            </div>
+          )}
         </div>
 
         {/* Protection Settings */}
