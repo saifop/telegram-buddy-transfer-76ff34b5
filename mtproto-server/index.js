@@ -1492,7 +1492,7 @@ async function handleStartMonitoring({ accounts, groups, sessionId, supabaseUrl,
           let cycleTotalNew = 0;
 
           for (const { entity, title } of resolvedEntities) {
-            if (monitor.stopRequested || !activeMonitors.has(sessionId)) break;
+            if (monitor.stopRequested) break;
 
             let scanned = 0;
             try {
