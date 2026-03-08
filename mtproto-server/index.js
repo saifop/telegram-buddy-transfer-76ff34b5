@@ -38,7 +38,7 @@ app.get('/', (req, res) => {
   res.json({ 
     status: 'ok', 
     message: 'Telegram MTProto Server is running',
-    version: '3.1.0',
+    version: '3.1.1',
     activeMonitors: activeMonitors.size,
     activeBatchJobs: activeBatchJobs.size,
     uptime: Math.floor(process.uptime()),
@@ -1481,14 +1481,18 @@ async function handleStartMonitoring({ accounts, groups, sessionId, supabaseUrl,
 
       // ── Background: CONTINUOUS history scan (loops forever) ──────
       (async () => {
+        // Wait for activeMonitors to be set before starting
+        while (!activeMonitors.has(sessionId) && !monitor.stopRequested) {
+          await new Promise(r => setTimeout(r, 500));
+        }
         let cycleNum = 0;
-        while (!monitor.stopRequested && activeMonitors.has(sessionId)) {
+        while (!monitor.stopRequested) {
           cycleNum++;
           console.log(`[Monitor ${sessionId}] 📜 History scan cycle #${cycleNum} — ${resolvedEntities.length} groups`);
           let cycleTotalNew = 0;
 
           for (const { entity, title } of resolvedEntities) {
-            if (monitor.stopRequested || !activeMonitors.has(sessionId)) break;
+            if (monitor.stopRequested) break;
 
             let scanned = 0;
             try {
@@ -1550,7 +1554,7 @@ async function handleStartMonitoring({ accounts, groups, sessionId, supabaseUrl,
           } catch (_) {}
 
           // Cooldown between cycles: 45 seconds
-          if (!monitor.stopRequested && activeMonitors.has(sessionId)) {
+          if (!monitor.stopRequested) {
             console.log(`[Monitor ${sessionId}] 📜 Waiting 45s before next cycle...`);
             await new Promise(r => setTimeout(r, 45000));
           }
@@ -1560,9 +1564,13 @@ async function handleStartMonitoring({ accounts, groups, sessionId, supabaseUrl,
 
       // ── Background: connection health check every 2 minutes ──────
       (async () => {
-        while (!monitor.stopRequested && activeMonitors.has(sessionId)) {
+        // Wait for activeMonitors to be set
+        while (!activeMonitors.has(sessionId) && !monitor.stopRequested) {
+          await new Promise(r => setTimeout(r, 500));
+        }
+        while (!monitor.stopRequested) {
           await new Promise(r => setTimeout(r, 120000)); // 2 min
-          if (monitor.stopRequested || !activeMonitors.has(sessionId)) break;
+          if (monitor.stopRequested) break;
           try {
             const me = await client.getMe();
             if (me) console.log(`[Monitor ${sessionId}] 💓 ${account.phone} alive`);
