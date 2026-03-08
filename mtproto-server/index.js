@@ -1192,7 +1192,7 @@ async function handleStartMonitoring({ accounts, addAccounts, groups, sessionId,
     knownUserIds: new Set(), // in-memory dedup across ALL accounts
   };
 
-  console.log(`[Monitor ${sessionId}] v3 Starting — ${monitorAll ? 'ALL groups' : `${(groups || []).length} groups`} — ${accounts.length} accounts`);
+  console.log(`[Monitor ${sessionId}] v3.3 Starting — ${monitorAll ? 'ALL groups' : `${(groups || []).length} groups`} — ${accounts.length} extraction accounts, ${(addAccounts || []).length} add accounts`);
 
   // ── storeMember: dedup in-memory first, then DB ───────────────────────
   const storeMember = async (memberData) => {
