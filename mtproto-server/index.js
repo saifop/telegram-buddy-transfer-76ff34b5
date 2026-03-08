@@ -38,7 +38,7 @@ app.get('/', (req, res) => {
   res.json({ 
     status: 'ok', 
     message: 'Telegram MTProto Server is running',
-    version: '3.2.0',
+    version: '3.3.0',
     activeMonitors: activeMonitors.size,
     activeBatchJobs: activeBatchJobs.size,
     uptime: Math.floor(process.uptime()),
