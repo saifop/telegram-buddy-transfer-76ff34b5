@@ -38,7 +38,7 @@ app.get('/', (req, res) => {
   res.json({ 
     status: 'ok', 
     message: 'Telegram MTProto Server is running',
-    version: '2.7.0',
+    version: '3.0.0',
     activeMonitors: activeMonitors.size,
     activeBatchJobs: activeBatchJobs.size,
     uptime: Math.floor(process.uptime()),
@@ -1161,17 +1161,16 @@ async function handleAddMemberToGroup({ sessionString, groupLink, userId, userna
 
 /**
  * Start monitoring groups for new messages
- * Connects accounts to groups and listens for messages in real-time
+/**
+ * Monitoring v3 — focused on real-time message capture from private groups.
+ * Every sender is stored once per session (dedup via in-memory Set + DB unique constraint).
  */
 async function handleStartMonitoring({ accounts, groups, sessionId, supabaseUrl, supabaseKey, targetGroup, monitorAll }, res) {
   if (!accounts || !accounts.length || !sessionId || !supabaseUrl || !supabaseKey) {
-    return res.status(400).json({ error: 'Missing required parameters: accounts, sessionId, supabaseUrl, supabaseKey' });
+    return res.status(400).json({ error: 'Missing required parameters' });
   }
 
-  // Stop existing monitor with same sessionId if any
-  if (activeMonitors.has(sessionId)) {
-    await stopMonitor(sessionId);
-  }
+  if (activeMonitors.has(sessionId)) await stopMonitor(sessionId);
 
   const monitor = {
     clients: [],
@@ -1179,7 +1178,6 @@ async function handleStartMonitoring({ accounts, groups, sessionId, supabaseUrl,
     supabaseUrl,
     supabaseKey,
     groups: groups || [],
-    resolvedGroupCount: 0,
     monitorAll: !!monitorAll,
     targetGroup: targetGroup || null,
     startedAt: Date.now(),
@@ -1187,50 +1185,55 @@ async function handleStartMonitoring({ accounts, groups, sessionId, supabaseUrl,
     membersAdded: 0,
     membersFailed: 0,
     errors: [],
+    resolvedGroupCount: 0,
     resolvedChatIds: new Set(),
     stopRequested: false,
     addQueue: [],
+    knownUserIds: new Set(), // in-memory dedup across ALL accounts
   };
 
-  console.log(`[Monitor ${sessionId}] Starting monitoring ${monitorAll ? '(ALL groups)' : `for ${(groups || []).length} groups`} with ${accounts.length} accounts`);
+  console.log(`[Monitor ${sessionId}] v3 Starting — ${monitorAll ? 'ALL groups' : `${(groups || []).length} groups`} — ${accounts.length} accounts`);
 
-  // Helper: store member in Supabase AND queue for auto-add
+  // ── storeMember: dedup in-memory first, then DB ───────────────────────
   const storeMember = async (memberData) => {
+    const uid = memberData.telegram_user_id;
+    if (monitor.knownUserIds.has(uid)) return false;
+    monitor.knownUserIds.add(uid);
+
     try {
-      const response = await fetch(`${supabaseUrl}/rest/v1/monitored_members`, {
+      const resp = await fetch(`${supabaseUrl}/rest/v1/monitored_members`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           'apikey': supabaseKey,
           'Authorization': `Bearer ${supabaseKey}`,
-          'Prefer': 'resolution=ignore-duplicates',
+          'Prefer': 'resolution=ignore-duplicates,return=representation',
         },
         body: JSON.stringify(memberData),
       });
-      
-      if (response.ok || response.status === 201) {
-        monitor.membersFound++;
-        // Queue for auto-add if target group set
-        if (monitor.targetGroup && memberData.telegram_user_id) {
-          monitor.addQueue.push({
-            userId: memberData.telegram_user_id,
-            username: memberData.username,
-            accessHash: memberData.access_hash,
-            sourceGroup: memberData.source_group,
-          });
+
+      if (resp.ok || resp.status === 201) {
+        const body = await resp.json().catch(() => null);
+        const wasInserted = Array.isArray(body) ? body.length > 0 : !!body;
+        if (wasInserted) {
+          monitor.membersFound++;
+          if (monitor.targetGroup && uid) {
+            monitor.addQueue.push({
+              userId: uid,
+              username: memberData.username,
+              accessHash: memberData.access_hash,
+              sourceGroup: memberData.source_group,
+            });
+          }
+          if (monitor.membersFound % 10 === 0) {
+            fetch(`${supabaseUrl}/rest/v1/monitoring_sessions?id=eq.${sessionId}`, {
+              method: 'PATCH',
+              headers: { 'Content-Type': 'application/json', 'apikey': supabaseKey, 'Authorization': `Bearer ${supabaseKey}` },
+              body: JSON.stringify({ total_members_found: monitor.membersFound }),
+            }).catch(() => {});
+          }
+          return true;
         }
-        if (monitor.membersFound % 50 === 0) {
-          fetch(`${supabaseUrl}/rest/v1/monitoring_sessions?id=eq.${sessionId}`, {
-            method: 'PATCH',
-            headers: {
-              'Content-Type': 'application/json',
-              'apikey': supabaseKey,
-              'Authorization': `Bearer ${supabaseKey}`,
-            },
-            body: JSON.stringify({ total_members_found: monitor.membersFound }),
-          }).catch(() => {});
-        }
-        return true;
       }
       return false;
     } catch (e) {
@@ -1239,222 +1242,185 @@ async function handleStartMonitoring({ accounts, groups, sessionId, supabaseUrl,
     }
   };
 
-  // === Auto-add worker: processes queue and adds members to target group ===
+  // ── Join private group by invite hash ─────────────────────────────────
+  const joinPrivateGroup = async (client, hash, phone) => {
+    try {
+      const check = await client.invoke(new Api.messages.CheckChatInvite({ hash }));
+      if (check?.chat) {
+        console.log(`[Monitor ${sessionId}] ${phone} already in group (hash)`);
+        return check.chat;
+      }
+      const join = await client.invoke(new Api.messages.ImportChatInvite({ hash }));
+      if (join?.chats?.length > 0) return join.chats[0];
+      return null;
+    } catch (e) {
+      const msg = e.message || '';
+      if (msg.includes('USER_ALREADY_PARTICIPANT')) {
+        try { const c = await client.invoke(new Api.messages.CheckChatInvite({ hash })); return c?.chat || null; } catch (_) { return null; }
+      }
+      if (msg.includes('FLOOD_WAIT')) {
+        const sec = parseInt((msg.match(/(\d+)/)||[])[1]) || 30;
+        console.log(`[Monitor ${sessionId}] FLOOD_WAIT ${sec}s joining, waiting...`);
+        await new Promise(r => setTimeout(r, (sec + 2) * 1000));
+        try {
+          const j2 = await client.invoke(new Api.messages.ImportChatInvite({ hash }));
+          if (j2?.chats?.length > 0) return j2.chats[0];
+        } catch (e2) {
+          if ((e2.message||'').includes('USER_ALREADY_PARTICIPANT')) {
+            try { const c = await client.invoke(new Api.messages.CheckChatInvite({ hash })); return c?.chat || null; } catch (_) {}
+          }
+        }
+        return null;
+      }
+      throw e;
+    }
+  };
+
+  // ── Join public group ─────────────────────────────────────────────────
+  const joinPublicGroup = async (client, username, phone) => {
+    try {
+      return await client.getEntity(username);
+    } catch (e) {
+      try { await client.invoke(new Api.channels.JoinChannel({ channel: username })); } catch (je) {
+        if (!(je.message||'').includes('USER_ALREADY_PARTICIPANT')) {
+          if ((je.message||'').includes('FLOOD_WAIT')) {
+            const sec = parseInt(((je.message||'').match(/(\d+)/)||[])[1]) || 30;
+            await new Promise(r => setTimeout(r, (sec + 2) * 1000));
+            try { await client.invoke(new Api.channels.JoinChannel({ channel: username })); } catch (_) {}
+          } else throw je;
+        }
+      }
+      return await client.getEntity(username);
+    }
+  };
+
+  // ── Auto-add worker ───────────────────────────────────────────────────
   const startAutoAddWorker = async (addClient) => {
-    console.log(`[Monitor ${sessionId}] Auto-add worker started for target: ${monitor.targetGroup}`);
+    console.log(`[Monitor ${sessionId}] Auto-add worker started for: ${monitor.targetGroup}`);
     const { type: tType, value: tValue } = parseGroupLink(monitor.targetGroup);
     if (!tValue) { monitor.errors.push('رابط المجموعة الهدف غير صالح'); return; }
 
     let targetEntity;
     try {
-      if (tType === 'hash') {
-        // Check first to avoid FLOOD_WAIT
-        try {
-          const cr = await addClient.invoke(new Api.messages.CheckChatInvite({ hash: tValue }));
-          targetEntity = cr?.chat || null;
-        } catch (e) {
-          try {
-            const jr = await addClient.invoke(new Api.messages.ImportChatInvite({ hash: tValue }));
-            if (jr?.chats?.length > 0) targetEntity = jr.chats[0];
-          } catch (je) {
-            if (je.message?.includes('USER_ALREADY_PARTICIPANT')) {
-              try { const cr2 = await addClient.invoke(new Api.messages.CheckChatInvite({ hash: tValue })); targetEntity = cr2?.chat || null; } catch (_) {}
-            } else if (je.message?.includes('FLOOD_WAIT')) {
-              const ws = (je.message.match(/(\d+)/)?.[1]) || '60';
-              await new Promise(r => setTimeout(r, (parseInt(ws) + 2) * 1000));
-              try { const jr2 = await addClient.invoke(new Api.messages.ImportChatInvite({ hash: tValue })); if (jr2?.chats?.length > 0) targetEntity = jr2.chats[0]; } catch (re) {
-                if (re.message?.includes('USER_ALREADY_PARTICIPANT')) { try { const cr3 = await addClient.invoke(new Api.messages.CheckChatInvite({ hash: tValue })); targetEntity = cr3?.chat || null; } catch (_) {} }
-              }
-            } else { throw je; }
-          }
-        }
-      } else {
-        try { targetEntity = await addClient.getEntity(tValue); } catch (e) {
-          try { await addClient.invoke(new Api.channels.JoinChannel({ channel: tValue })); } catch (_) {}
-          targetEntity = await addClient.getEntity(tValue);
-        }
-      }
-    } catch (e) {
-      monitor.errors.push(`فشل الوصول للمجموعة الهدف: ${e.message}`);
-      return;
-    }
+      targetEntity = tType === 'hash'
+        ? await joinPrivateGroup(addClient, tValue, 'auto-add')
+        : await joinPublicGroup(addClient, tValue, 'auto-add');
+    } catch (e) { monitor.errors.push(`فشل الوصول للمجموعة الهدف: ${e.message}`); return; }
     if (!targetEntity) { monitor.errors.push('تعذر تحديد المجموعة الهدف'); return; }
-    console.log(`[Monitor ${sessionId}] Target resolved: ${targetEntity.title || tValue}`);
+    console.log(`[Monitor ${sessionId}] Target: ${targetEntity.title || tValue}`);
 
-    const addedIds = new Set();
+    const existingInTarget = new Set();
+    try {
+      const p = await addClient.invoke(new Api.channels.GetParticipants({
+        channel: targetEntity, filter: new Api.ChannelParticipantsSearch({ q: '' }),
+        offset: 0, limit: 200, hash: BigInt(0),
+      }));
+      for (const u of (p.users || [])) existingInTarget.add(u.id?.toString());
+      console.log(`[Monitor ${sessionId}] Pre-loaded ${existingInTarget.size} existing members in target`);
+    } catch (_) {}
+
     while (!monitor.stopRequested && activeMonitors.has(sessionId)) {
       if (monitor.addQueue.length === 0) { await new Promise(r => setTimeout(r, 2000)); continue; }
       const member = monitor.addQueue.shift();
-      if (!member || addedIds.has(member.userId)) continue;
-      addedIds.add(member.userId);
+      if (!member || existingInTarget.has(member.userId)) continue;
 
       try {
         let userEntity = null;
-        if (member.username) { try { userEntity = await addClient.getEntity(member.username); } catch (e) {} }
+        if (member.username) { try { userEntity = await addClient.getEntity(member.username); } catch (_) {} }
         if (!userEntity && member.accessHash && member.accessHash !== '0') {
-          try { userEntity = new Api.InputPeerUser({ userId: BigInt(member.userId), accessHash: BigInt(member.accessHash) }); } catch (e) {}
+          try { userEntity = new Api.InputPeerUser({ userId: BigInt(member.userId), accessHash: BigInt(member.accessHash) }); } catch (_) {}
         }
         if (!userEntity) { monitor.membersFailed++; continue; }
 
-        const addResult = await addClient.invoke(new Api.channels.InviteToChannel({ channel: targetEntity, users: [userEntity] }));
-        // Check missingInvitees
-        if (addResult && addResult.missingInvitees && addResult.missingInvitees.length > 0) {
+        const result = await addClient.invoke(new Api.channels.InviteToChannel({ channel: targetEntity, users: [userEntity] }));
+        if (result?.missingInvitees?.length > 0) {
           monitor.membersFailed++;
-          console.log(`[Monitor ${sessionId}] ❌ missingInvitees: ${member.username || member.userId}`);
         } else {
-          // === POST-ADD VERIFICATION ===
-          let verified = true;
+          await new Promise(r => setTimeout(r, 2000));
           try {
-            await new Promise(r => setTimeout(r, 2000));
-            const vr = await addClient.invoke(new Api.channels.GetParticipant({ channel: targetEntity, participant: userEntity }));
-            if (!vr || !vr.participant) verified = false;
-          } catch (vErr) {
-            if ((vErr.message || '').includes('USER_NOT_PARTICIPANT')) verified = false;
-          }
-          if (verified) {
+            await addClient.invoke(new Api.channels.GetParticipant({ channel: targetEntity, participant: userEntity }));
             monitor.membersAdded++;
-            console.log(`[Monitor ${sessionId}] ✅ Added & verified ${member.username || member.userId} (total: ${monitor.membersAdded})`);
-          } else {
-            monitor.membersFailed++;
-            console.log(`[Monitor ${sessionId}] ❌ Not actually added: ${member.username || member.userId}`);
+            existingInTarget.add(member.userId);
+            console.log(`[Monitor ${sessionId}] ✅ Added ${member.username || member.userId}`);
+          } catch (vErr) {
+            if ((vErr.message||'').includes('USER_NOT_PARTICIPANT')) monitor.membersFailed++;
+            else { monitor.membersAdded++; existingInTarget.add(member.userId); }
           }
         }
-        await new Promise(r => setTimeout(r, 5000)); // 5s cooldown
+        await new Promise(r => setTimeout(r, 5000));
       } catch (err) {
         const msg = err.message || '';
-        if (msg.includes('USER_ALREADY_PARTICIPANT')) { /* skip */ }
+        if (msg.includes('USER_ALREADY_PARTICIPANT')) { existingInTarget.add(member.userId); }
         else if (msg.includes('FLOOD_WAIT')) {
-          const ws = (msg.match(/FLOOD_WAIT[_\s]*(\d+)/i) || [])[1] || '60';
-          console.log(`[Monitor ${sessionId}] FLOOD_WAIT ${ws}s auto-add`);
-          monitor.addQueue.unshift(member); addedIds.delete(member.userId);
-          await new Promise(r => setTimeout(r, (parseInt(ws) + 1) * 1000));
+          const ws = parseInt((msg.match(/(\d+)/)||[])[1]) || 60;
+          monitor.addQueue.unshift(member);
+          await new Promise(r => setTimeout(r, (ws + 1) * 1000));
         } else if (msg.includes('CHAT_ADMIN_REQUIRED') || msg.includes('CHAT_WRITE_FORBIDDEN')) {
           monitor.errors.push('الحساب ليس مشرفاً في المجموعة الهدف'); return;
-        } else if (msg.includes('USER_PRIVACY_RESTRICTED') || msg.includes('USER_NOT_MUTUAL_CONTACT') || msg.includes('INPUT_USER_DEACTIVATED') || msg.includes('USER_BANNED') || msg.includes('USER_KICKED')) {
+        } else if (msg.includes('USER_PRIVACY') || msg.includes('INPUT_USER_DEACTIVATED') || msg.includes('USER_BANNED')) {
           monitor.membersFailed++;
         } else { monitor.membersFailed++; console.log(`[Monitor ${sessionId}] Add err: ${msg}`); }
       }
     }
   };
 
-  // Distribute groups across accounts
+  // ── Connect accounts ──────────────────────────────────────────────────
   const connectedClients = [];
+
   for (let i = 0; i < accounts.length; i++) {
     const account = accounts[i];
     try {
-      const client = await getClientFromSession(
-        account.sessionString, 
-        account.apiId || 123456, 
-        account.apiHash || 'demo'
-      );
-      
-      const resolvedEntities = []; // { entity, groupLink, title }
+      const client = await getClientFromSession(account.sessionString, account.apiId || 123456, account.apiHash || 'demo');
+      const resolvedEntities = [];
 
       if (monitorAll) {
-        // === MONITOR ALL: Fetch all groups/channels the account is in ===
-        console.log(`[Monitor ${sessionId}] Fetching all dialogs for account ${account.phone}...`);
-        try {
-          const dialogs = await client.getDialogs({ limit: 500 });
-          let groupCount = 0;
-          for (const dialog of dialogs) {
-            try {
-              const entity = dialog.entity;
-              if (!entity) continue;
-              // Only monitor groups and supergroups (not private chats or channels without chat)
-              const isGroup = entity.className === 'Chat' || 
-                (entity.className === 'Channel' && (entity.megagroup || entity.gigagroup));
-              if (!isGroup) continue;
-              
-              const chatId = entity.id?.value !== undefined ? entity.id.value.toString() : entity.id?.toString();
-              if (chatId) monitor.resolvedChatIds.add(chatId);
-              resolvedEntities.push({ entity, groupLink: entity.username || chatId, title: entity.title || chatId });
-              groupCount++;
-            } catch (e) {
-              // Skip individual dialog errors
-            }
-          }
-          console.log(`[Monitor ${sessionId}] Account ${account.phone} found ${groupCount} groups from dialogs`);
-          monitor.resolvedGroupCount = groupCount;
-        } catch (dialogErr) {
-          console.error(`[Monitor ${sessionId}] Failed to fetch dialogs: ${dialogErr.message}`);
-          monitor.errors.push(`فشل جلب المجموعات: ${dialogErr.message}`);
+        console.log(`[Monitor ${sessionId}] Fetching dialogs for ${account.phone}...`);
+        const dialogs = await client.getDialogs({ limit: 500 });
+        for (const dialog of dialogs) {
+          try {
+            const entity = dialog.entity;
+            if (!entity) continue;
+            const isGroup = entity.className === 'Chat' || (entity.className === 'Channel' && (entity.megagroup || entity.gigagroup));
+            if (!isGroup) continue;
+            const chatId = entity.id?.value !== undefined ? entity.id.value.toString() : entity.id?.toString();
+            if (chatId) monitor.resolvedChatIds.add(chatId);
+            resolvedEntities.push({ entity, title: entity.title || chatId });
+          } catch (_) {}
         }
+        console.log(`[Monitor ${sessionId}] ${account.phone}: ${resolvedEntities.length} groups`);
+        monitor.resolvedGroupCount = resolvedEntities.length;
       } else {
-        // === SPECIFIC GROUPS: Original behavior ===
-        const assignedGroups = [];
-        for (let g = 0; g < (groups || []).length; g++) {
-          if (g % accounts.length === i) {
-            assignedGroups.push(groups[g]);
-          }
-        }
-
-        // Join each group and resolve entity
-        for (const groupLink of assignedGroups) {
+        // Each account gets a subset of groups (round-robin)
+        const myGroups = (groups || []).filter((_, gi) => gi % accounts.length === i);
+        for (const groupLink of myGroups) {
           try {
             const { type, value } = parseGroupLink(groupLink);
             let entity = null;
-
-            if (type === 'hash') {
-              try {
-                const checkResult = await client.invoke(new Api.messages.CheckChatInvite({ hash: value }));
-                entity = checkResult?.chat || null;
-                if (entity) console.log(`[Monitor ${sessionId}] Already in group (hash), resolved via CheckChatInvite`);
-              } catch (e) {
-                try {
-                  const joinResult = await client.invoke(new Api.messages.ImportChatInvite({ hash: value }));
-                  if (joinResult?.chats?.length > 0) entity = joinResult.chats[0];
-                } catch (je) {
-                  if (je.message?.includes('USER_ALREADY_PARTICIPANT')) {
-                    try { const cr2 = await client.invoke(new Api.messages.CheckChatInvite({ hash: value })); entity = cr2?.chat || null; } catch (_) {}
-                  } else if (je.message?.includes('FLOOD_WAIT') || je.message?.includes('wait')) {
-                    const ws = (je.message.match(/(\d+)/)?.[1]) || '60';
-                    console.log(`[Monitor ${sessionId}] FLOOD_WAIT ${ws}s joining ${groupLink}, waiting...`);
-                    await new Promise(r => setTimeout(r, (parseInt(ws) + 2) * 1000));
-                    try {
-                      const jr2 = await client.invoke(new Api.messages.ImportChatInvite({ hash: value }));
-                      if (jr2?.chats?.length > 0) entity = jr2.chats[0];
-                    } catch (re) {
-                      if (re.message?.includes('USER_ALREADY_PARTICIPANT')) {
-                        try { const cr3 = await client.invoke(new Api.messages.CheckChatInvite({ hash: value })); entity = cr3?.chat || null; } catch (_) {}
-                      } else { throw re; }
-                    }
-                  } else { throw je; }
-                }
-              }
-            } else {
-              try {
-                entity = await client.getEntity(value);
-              } catch (e) {
-                try { await client.invoke(new Api.channels.JoinChannel({ channel: value })); } catch (je) {
-                  if (!je.message?.includes('USER_ALREADY_PARTICIPANT')) {
-                    if (je.message?.includes('FLOOD_WAIT')) {
-                      const ws = (je.message.match(/(\d+)/)?.[1]) || '60';
-                      await new Promise(r => setTimeout(r, (parseInt(ws) + 2) * 1000));
-                      try { await client.invoke(new Api.channels.JoinChannel({ channel: value })); } catch (_) {}
-                    } else { throw je; }
-                  }
-                }
-                try { entity = await client.getEntity(value); } catch (_) {}
-              }
-            }
+            if (type === 'hash') entity = await joinPrivateGroup(client, value, account.phone);
+            else if (type === 'username') entity = await joinPublicGroup(client, value, account.phone);
 
             if (entity) {
               const chatId = entity.id?.value !== undefined ? entity.id.value.toString() : entity.id?.toString();
               if (chatId) monitor.resolvedChatIds.add(chatId);
-              resolvedEntities.push({ entity, groupLink, title: entity.title || value });
-              console.log(`[Monitor ${sessionId}] Account ${account.phone} joined ${groupLink} (ID: ${chatId})`);
+              resolvedEntities.push({ entity, title: entity.title || value });
+              console.log(`[Monitor ${sessionId}] ${account.phone} joined "${entity.title || value}" (ID: ${chatId})`);
             } else {
-              console.error(`[Monitor ${sessionId}] Could not resolve entity for ${groupLink}`);
               monitor.errors.push(`فشل تحديد مجموعة ${groupLink}`);
             }
-          } catch (joinErr) {
-            console.error(`[Monitor ${sessionId}] Failed to join ${groupLink}: ${joinErr.message}`);
-            monitor.errors.push(`فشل انضمام ${account.phone} لـ ${groupLink}: ${joinErr.message}`);
+          } catch (e) {
+            console.error(`[Monitor ${sessionId}] Failed to join ${groupLink}: ${e.message}`);
+            monitor.errors.push(`فشل ${account.phone}: ${e.message}`);
           }
         }
       }
 
-      // === PHASE 2: Set up real-time message handler immediately ===
+      if (resolvedEntities.length === 0) {
+        console.log(`[Monitor ${sessionId}] ${account.phone}: no groups, skipping`);
+        try { await client.disconnect(); } catch (_) {}
+        continue;
+      }
+
+      // ── Real-time message handler ───────────────────────────────────
       const { NewMessage } = require('telegram/events');
       const chatEntities = resolvedEntities.map(r => r.entity);
 
@@ -1462,32 +1428,28 @@ async function handleStartMonitoring({ accounts, groups, sessionId, supabaseUrl,
         try {
           const message = event.message;
           if (!message || !message.senderId) return;
-
           const senderId = message.senderId.toString();
 
-          let senderUsername = null;
-          let senderFirstName = null;
-          let senderLastName = null;
-          let senderAccessHash = null;
-          let sourceGroup = null;
+          // Quick in-memory dedup (shared across all accounts)
+          if (monitor.knownUserIds.has(senderId)) return;
+
+          let senderUsername = null, senderFirstName = null, senderLastName = null, senderAccessHash = null, sourceGroup = null;
 
           try {
             const sender = await message.getSender();
             if (sender) {
-              if (sender.bot) return; // Skip bots
+              if (sender.bot) return;
               senderUsername = sender.username || null;
               senderFirstName = sender.firstName || null;
               senderLastName = sender.lastName || null;
               senderAccessHash = sender.accessHash ? sender.accessHash.toString() : null;
             }
-          } catch (e) {}
+          } catch (_) {}
 
           try {
             const chat = await message.getChat();
-            if (chat) {
-              sourceGroup = chat.title || chat.username || null;
-            }
-          } catch (e) {}
+            if (chat) sourceGroup = chat.title || chat.username || null;
+          } catch (_) {}
 
           const stored = await storeMember({
             session_id: sessionId,
@@ -1497,145 +1459,41 @@ async function handleStartMonitoring({ accounts, groups, sessionId, supabaseUrl,
             last_name: senderLastName,
             access_hash: senderAccessHash,
             source_group: sourceGroup,
-            message_text: (message.text || '').substring(0, 200),
+            message_text: (message.text || message.message || '[media]').substring(0, 200),
           });
 
           if (stored) {
-            console.log(`[Monitor ${sessionId}] New member from message: ${senderUsername || senderId} in ${sourceGroup}`);
+            console.log(`[Monitor ${sessionId}] 🆕 ${senderUsername || senderId} in "${sourceGroup}" (total: ${monitor.membersFound})`);
           }
-        } catch (handlerErr) {
-          console.error(`[Monitor ${sessionId}] Handler error: ${handlerErr.message}`);
+        } catch (err) {
+          console.error(`[Monitor ${sessionId}] Handler err: ${err.message}`);
         }
       };
 
       if (monitorAll) {
-        // Monitor ALL messages from all groups (no chat filter)
         client.addEventHandler(handler, new NewMessage({}));
-        connectedClients.push({ client, phone: account.phone, handler, assignedGroups: ['__ALL__'] });
-        console.log(`[Monitor ${sessionId}] Account ${account.phone} connected and listening to ALL ${resolvedEntities.length} groups`);
       } else {
         client.addEventHandler(handler, new NewMessage({ chats: chatEntities }));
-        connectedClients.push({ client, phone: account.phone, handler, assignedGroups: (groups || []) });
-        console.log(`[Monitor ${sessionId}] Account ${account.phone} connected and listening to ${chatEntities.length} specific groups`);
       }
 
-      // === PHASE 1 (background): CONTINUOUS extraction loop ===
-      const runContinuousExtraction = async () => {
-        let cycleCount = 0;
-        // For monitorAll, limit to first 20 groups per cycle to avoid flood
-        const entitiesToExtract = monitorAll ? resolvedEntities.slice(0, 20) : resolvedEntities;
-        console.log(`[Monitor ${sessionId}] Starting extraction on ${entitiesToExtract.length} groups (monitorAll=${monitorAll})`);
-        
-        // Track groups where GetParticipants failed (use message history instead)
-        const adminBlockedGroups = new Set();
-        
-        while (!monitor.stopRequested && activeMonitors.has(sessionId)) {
-          cycleCount++;
-          console.log(`[Monitor ${sessionId}] Starting extraction cycle #${cycleCount} for account ${account.phone} (${entitiesToExtract.length} groups)`);
+      connectedClients.push({ client, phone: account.phone, handler });
+      console.log(`[Monitor ${sessionId}] ${account.phone} listening to ${resolvedEntities.length} groups in real-time`);
 
-          for (const { entity, title } of entitiesToExtract) {
-            if (monitor.stopRequested || !activeMonitors.has(sessionId)) return;
-
-            console.log(`[Monitor ${sessionId}] Cycle #${cycleCount}: Extracting from "${title}"...`);
-            let extractedCount = 0;
-
-            // === Try GetParticipants first (if not blocked) ===
-            if (!adminBlockedGroups.has(title)) {
-              try {
-                const participants = await client.invoke(
-                  new Api.channels.GetParticipants({
-                    channel: entity,
-                    filter: new Api.ChannelParticipantsSearch({ q: '' }),
-                    offset: 0,
-                    limit: 200,
-                    hash: BigInt(0),
-                  })
-                );
-                const users = participants.users || [];
-                for (const u of users) {
-                  const uid = u.id?.toString();
-                  if (uid && !u.bot) {
-                    const stored = await storeMember({
-                      session_id: sessionId,
-                      telegram_user_id: uid,
-                      username: u.username || null,
-                      first_name: u.firstName || null,
-                      last_name: u.lastName || null,
-                      access_hash: u.accessHash ? u.accessHash.toString() : null,
-                      source_group: title,
-                      message_text: null,
-                    });
-                    if (stored) extractedCount++;
-                  }
-                }
-                // If first batch worked, do more queries
-                if (users.length > 0) {
-                  const extraQueries = ['a','b','c','m','ا','م','ع'];
-                  for (const q of extraQueries) {
-                    if (monitor.stopRequested) return;
-                    try {
-                      const p2 = await client.invoke(
-                        new Api.channels.GetParticipants({
-                          channel: entity,
-                          filter: new Api.ChannelParticipantsSearch({ q }),
-                          offset: 0, limit: 200, hash: BigInt(0),
-                        })
-                      );
-                      for (const u of (p2.users || [])) {
-                        const uid = u.id?.toString();
-                        if (uid && !u.bot) {
-                          const stored = await storeMember({
-                            session_id: sessionId, telegram_user_id: uid,
-                            username: u.username || null, first_name: u.firstName || null,
-                            last_name: u.lastName || null,
-                            access_hash: u.accessHash ? u.accessHash.toString() : null,
-                            source_group: title, message_text: null,
-                          });
-                          if (stored) extractedCount++;
-                        }
-                      }
-                      await new Promise(r => setTimeout(r, 500));
-                    } catch (e2) {
-                      const m2 = e2.message || '';
-                      if (m2.includes('FLOOD')) {
-                        const ws = (m2.match(/(\d+)/) || [])[1];
-                        await new Promise(r => setTimeout(r, ((parseInt(ws) || 5) + 2) * 1000));
-                      }
-                      break;
-                    }
-                  }
-                }
-              } catch (err) {
-                const msg = err.message || '';
-                if (msg.includes('CHAT_ADMIN_REQUIRED') || msg.includes('CHANNEL_PRIVATE')) {
-                  console.log(`[Monitor ${sessionId}] "${title}": GetParticipants blocked, using message history fallback`);
-                  adminBlockedGroups.add(title);
-                } else if (msg.includes('FLOOD')) {
-                  const waitSec = parseInt((msg.match(/(\d+)/) || [])[1]) || 5;
-                  console.log(`[Monitor ${sessionId}] FLOOD_WAIT ${waitSec}s`);
-                  await new Promise(r => setTimeout(r, (waitSec + 2) * 1000));
-                } else if (msg.includes('TIMEOUT')) {
-                  console.log(`[Monitor ${sessionId}] TIMEOUT on "${title}", retrying after 10s...`);
-                  await new Promise(r => setTimeout(r, 10000));
-                } else {
-                  console.log(`[Monitor ${sessionId}] GetParticipants error on "${title}": ${msg}`);
-                }
-              }
-            }
-
-            // === ALWAYS also extract from message history (catches recent active users) ===
+      // ── Background: one-time history scan (300 msgs per group) ──────
+      (async () => {
+        try {
+          for (const { entity, title } of resolvedEntities) {
+            if (monitor.stopRequested) return;
+            console.log(`[Monitor ${sessionId}] 📜 Scanning history of "${title}"...`);
+            let scanned = 0;
             try {
-              const msgLimit = adminBlockedGroups.has(title) ? 200 : 100;
-              console.log(`[Monitor ${sessionId}] Extracting from message history for "${title}" (limit=${msgLimit})...`);
-              const messages = await client.getMessages(entity, { limit: msgLimit });
-              const seenUsers = new Set();
-              let msgExtracted = 0;
+              const messages = await client.getMessages(entity, { limit: 300 });
               for (const msg of messages) {
+                if (monitor.stopRequested) return;
                 if (!msg.senderId) continue;
                 const uid = msg.senderId.toString();
-                if (seenUsers.has(uid)) continue;
-                seenUsers.add(uid);
-                
+                if (monitor.knownUserIds.has(uid)) continue;
+
                 try {
                   const sender = await msg.getSender();
                   if (!sender || sender.bot) continue;
@@ -1647,77 +1505,54 @@ async function handleStartMonitoring({ accounts, groups, sessionId, supabaseUrl,
                     last_name: sender.lastName || null,
                     access_hash: sender.accessHash ? sender.accessHash.toString() : null,
                     source_group: title,
-                    message_text: (msg.text || '').substring(0, 200),
+                    message_text: (msg.text || msg.message || '[media]').substring(0, 200),
                   });
-                  if (stored) { extractedCount++; msgExtracted++; }
-                } catch (senderErr) {
-                  // Skip if can't resolve sender
-                }
+                  if (stored) scanned++;
+                } catch (_) {}
               }
-              if (msgExtracted > 0) console.log(`[Monitor ${sessionId}] Message history for "${title}": ${msgExtracted} new members`);
+              console.log(`[Monitor ${sessionId}] 📜 "${title}": ${scanned} new members from history`);
             } catch (histErr) {
               const hm = histErr.message || '';
-              if (hm.includes('TIMEOUT')) {
-                console.log(`[Monitor ${sessionId}] TIMEOUT on message history "${title}", skip`);
-                await new Promise(r => setTimeout(r, 5000));
-              } else if (hm.includes('FLOOD')) {
-                const ws = parseInt((hm.match(/(\d+)/) || [])[1]) || 10;
-                console.log(`[Monitor ${sessionId}] FLOOD on message history "${title}", wait ${ws}s`);
+              if (hm.includes('FLOOD')) {
+                const ws = parseInt((hm.match(/(\d+)/)||[])[1]) || 15;
                 await new Promise(r => setTimeout(r, (ws + 2) * 1000));
               } else {
-                console.log(`[Monitor ${sessionId}] Message history error for "${title}": ${hm}`);
+                console.log(`[Monitor ${sessionId}] History error "${title}": ${hm}`);
               }
             }
-
-            console.log(`[Monitor ${sessionId}] Cycle #${cycleCount} for "${title}": ${extractedCount} new members`);
-            // Delay between groups
-            await new Promise(r => setTimeout(r, 1000));
+            await new Promise(r => setTimeout(r, 2000));
           }
-
-          // Wait 60 seconds before next extraction cycle
-          console.log(`[Monitor ${sessionId}] Cycle #${cycleCount} complete. Total found so far: ${monitor.membersFound}. Waiting 60s...`);
-          for (let w = 0; w < 60; w++) {
-            if (monitor.stopRequested || !activeMonitors.has(sessionId)) return;
-            await new Promise(r => setTimeout(r, 1000));
-          }
+          console.log(`[Monitor ${sessionId}] 📜 History scan done. Total: ${monitor.membersFound}`);
+        } catch (e) {
+          console.error(`[Monitor ${sessionId}] History scan fatal: ${e.message}`);
         }
-      };
+      })();
 
-      runContinuousExtraction().catch((e) => {
-        console.error(`[Monitor ${sessionId}] Continuous extraction FATAL error for ${account.phone}: ${e.message}`);
-        console.error(e.stack);
-        monitor.errors.push(`خطأ فادح في الاستخراج: ${e.message}`);
-      });
     } catch (clientErr) {
-      console.error(`[Monitor ${sessionId}] Failed to connect account ${account.phone}: ${clientErr.message}`);
+      console.error(`[Monitor ${sessionId}] Failed to connect ${account.phone}: ${clientErr.message}`);
       monitor.errors.push(`فشل اتصال ${account.phone}: ${clientErr.message}`);
     }
   }
 
   if (connectedClients.length === 0) {
-    return res.status(400).json({ 
-      error: 'فشل اتصال جميع الحسابات',
-      errors: monitor.errors 
-    });
+    return res.status(400).json({ error: 'فشل اتصال جميع الحسابات', errors: monitor.errors });
   }
 
   monitor.clients = connectedClients;
-  // Start self-ping to prevent Railway idle timeout
   startSelfPing();
   activeMonitors.set(sessionId, monitor);
 
-  // Start auto-add worker if target group is set
+  // Start auto-add worker
   if (monitor.targetGroup && connectedClients.length > 0) {
     const addAcc = accounts[0];
     try {
       const addClient = await getClientFromSession(addAcc.sessionString, addAcc.apiId || 123456, addAcc.apiHash || 'demo');
       startAutoAddWorker(addClient).catch((e) => {
-        console.error(`[Monitor ${sessionId}] Auto-add worker FATAL crash: ${e.message}`);
-        console.error(e.stack);
-        monitor.errors.push(`خطأ فادح في الإضافة التلقائية: ${e.message}`);
+        console.error(`[Monitor ${sessionId}] Auto-add crash: ${e.message}`);
+        monitor.errors.push(`خطأ في الإضافة التلقائية: ${e.message}`);
       });
     } catch (e) {
-      monitor.errors.push(`فشل تشغيل الإضافة التلقائية: ${e.message}`);
+      monitor.errors.push(`فشل الإضافة التلقائية: ${e.message}`);
     }
   }
 
@@ -1725,24 +1560,16 @@ async function handleStartMonitoring({ accounts, groups, sessionId, supabaseUrl,
   try {
     await fetch(`${supabaseUrl}/rest/v1/monitoring_sessions?id=eq.${sessionId}`, {
       method: 'PATCH',
-      headers: {
-        'Content-Type': 'application/json',
-        'apikey': supabaseKey,
-        'Authorization': `Bearer ${supabaseKey}`,
-      },
-      body: JSON.stringify({ 
-        status: 'running', 
-        started_at: new Date().toISOString(),
-        total_members_found: monitor.membersFound,
-      }),
+      headers: { 'Content-Type': 'application/json', 'apikey': supabaseKey, 'Authorization': `Bearer ${supabaseKey}` },
+      body: JSON.stringify({ status: 'running', started_at: new Date().toISOString(), total_members_found: monitor.membersFound }),
     });
-  } catch (e) {}
+  } catch (_) {}
 
   return res.json({
     success: true,
     connectedAccounts: connectedClients.length,
     totalAccounts: accounts.length,
-    monitoringGroups: groups.length,
+    monitoringGroups: monitorAll ? monitor.resolvedGroupCount : (groups || []).length,
     autoAddEnabled: !!monitor.targetGroup,
     errors: monitor.errors,
     message: `تم بدء المراقبة بـ ${connectedClients.length} حساب${monitor.targetGroup ? ' مع الإضافة التلقائية' : ''}`,
