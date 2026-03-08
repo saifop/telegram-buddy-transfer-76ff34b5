@@ -140,15 +140,27 @@ export function MonitoringPanel({ accounts }: MonitoringPanelProps) {
   };
 
   const loadMembers = async (sessionId: string) => {
-    const { data } = await supabase
-      .from("monitored_members")
-      .select("*")
-      .eq("session_id", sessionId)
-      .order("discovered_at", { ascending: false });
+    const PAGE_SIZE = 1000;
+    let from = 0;
+    let allMembers: MonitoredMember[] = [];
 
-    if (data) {
-      setMembers(data as unknown as MonitoredMember[]);
+    while (true) {
+      const { data, error } = await supabase
+        .from("monitored_members")
+        .select("*")
+        .eq("session_id", sessionId)
+        .order("discovered_at", { ascending: false })
+        .range(from, from + PAGE_SIZE - 1);
+
+      if (error || !data) break;
+
+      allMembers = allMembers.concat(data as unknown as MonitoredMember[]);
+
+      if (data.length < PAGE_SIZE) break;
+      from += PAGE_SIZE;
     }
+
+    setMembers(allMembers);
   };
 
   const checkLiveStatus = async (sessionId: string) => {
