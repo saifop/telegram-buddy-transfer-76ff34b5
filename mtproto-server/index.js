@@ -1869,6 +1869,7 @@ async function handleStartBatchAdd({ accounts, members, targetGroup, sourceGroup
       delayMax: settings?.delayMax || 30,
       maxRetries: settings?.maxRetries || 2,
       cooldownAfterFlood: settings?.cooldownAfterFlood || 300,
+      retryCycles: settings?.retryCycles || 0,
     },
     startedAt: Date.now(),
     stopRequested: false,
@@ -1880,6 +1881,8 @@ async function handleStartBatchAdd({ accounts, members, targetGroup, sourceGroup
     skippedCount: 0,
     currentMember: null,
     currentAccount: null,
+    currentCycle: 1,
+    totalCycles: (settings?.retryCycles || 0) + 1,
     logs: [],
     bannedAccounts: new Set(),
     notAdminAccounts: new Set(),
@@ -1890,10 +1893,10 @@ async function handleStartBatchAdd({ accounts, members, targetGroup, sourceGroup
 
   activeBatchJobs.set(id, job);
   startSelfPing(); // Keep Railway alive during batch jobs
-  console.log(`[BatchAdd ${id}] Starting: ${members.length} members, ${accounts.length} accounts → ${targetGroup}`);
+  console.log(`[BatchAdd ${id}] Starting: ${members.length} members, ${accounts.length} accounts → ${targetGroup}, cycles: ${job.totalCycles}`);
 
   // Respond immediately
-  res.json({ success: true, jobId: id, message: `بدأت العملية: ${members.length} عضو` });
+  res.json({ success: true, jobId: id, message: `بدأت العملية: ${members.length} عضو، ${job.totalCycles} دورة` });
 
   // Run in background
   runBatchAddJob(job).catch(err => {
@@ -1930,9 +1933,62 @@ async function runBatchAddJob(job) {
     return null;
   };
 
-  // Pre-filter
+  // === PRE-CHECK: Fetch existing members in target group ===
+  let existingMemberIds = new Set();
+  try {
+    const firstAcc = accounts[0];
+    const preClient = await getClientFromSession(firstAcc.sessionString, firstAcc.apiId || 123456, firstAcc.apiHash || 'demo');
+    const { type: tType, value: tValue } = parseGroupLink(job.targetGroup);
+    let targetEnt;
+    if (tType === 'hash') {
+      try { const cr = await preClient.invoke(new Api.messages.CheckChatInvite({ hash: tValue })); if (cr?.chat) targetEnt = cr.chat; } catch(e) {}
+    } else {
+      try { targetEnt = await preClient.getEntity(tValue); } catch(e) {}
+    }
+    if (targetEnt && targetEnt.className !== 'Chat') {
+      addJobLog(job, 'info', '🔍 جاري فحص الأعضاء الموجودين في المجموعة المستهدفة...');
+      let offset = 0;
+      const limit = 200;
+      for (let p = 0; p < 50; p++) { // max 10000 members
+        try {
+          const participants = await preClient.invoke(new Api.channels.GetParticipants({
+            channel: targetEnt,
+            filter: new Api.ChannelParticipantsRecent({}),
+            offset, limit, hash: BigInt(0)
+          }));
+          if (!participants?.users?.length) break;
+          for (const u of participants.users) {
+            existingMemberIds.add(u.id?.toString());
+          }
+          if (participants.users.length < limit) break;
+          offset += limit;
+          await sleep(500);
+        } catch(e) {
+          // If admin required, try search-based extraction
+          if (e.message?.includes('CHAT_ADMIN_REQUIRED')) {
+            addJobLog(job, 'info', '⚠️ لا صلاحيات لجلب كل الأعضاء، سيتم الاعتماد على USER_ALREADY_PARTICIPANT');
+          }
+          break;
+        }
+      }
+      addJobLog(job, 'info', `✅ تم العثور على ${existingMemberIds.size} عضو موجود في المجموعة المستهدفة`);
+    }
+    try { await preClient.disconnect(); } catch(_) {}
+  } catch(e) {
+    addJobLog(job, 'warning', `تعذر فحص الأعضاء الحاليين: ${(e.message||'').substring(0,50)}`);
+  }
+
+  // Pre-filter: skip members already in target + those without identity
   const hasSourceGroup = !!job.sourceGroup.trim();
   for (const m of job.members) {
+    // Skip if already in target group
+    if (m.userId && existingMemberIds.has(m.userId.toString())) {
+      m.status = 'skipped';
+      m.error = 'موجود مسبقاً';
+      job.skippedCount++;
+      job.processed++;
+      continue;
+    }
     const hasUsername = !!m.username?.trim();
     const hasAccessHash = !!m.accessHash?.trim() && m.accessHash !== '0';
     if (!hasUsername && !hasAccessHash && !hasSourceGroup) {
@@ -1943,178 +1999,215 @@ async function runBatchAddJob(job) {
     }
   }
 
-  const pendingMembers = job.members.filter(m => m.status === 'pending');
-  job.total = pendingMembers.length + job.processed;
-  addJobLog(job, 'info', `بدء إضافة ${pendingMembers.length} عضو بـ ${accounts.length} حساب`);
-
-  for (let i = 0; i < pendingMembers.length; i++) {
-    if (job.stopRequested) { job.status = 'stopped'; break; }
-    while (job.pauseRequested && !job.stopRequested) { job.status = 'paused'; await sleep(500); }
-    if (job.stopRequested) { job.status = 'stopped'; break; }
-    job.status = 'running';
-
-    const member = pendingMembers[i];
-    const memberLabel = member.username ? `@${member.username}` : (member.firstName || `ID:${member.userId}`);
-    job.currentMember = memberLabel;
-
-    let retries = 0;
-    let memberDone = false;
-
-    while (!memberDone && retries <= settings.maxRetries && !job.stopRequested) {
-      let account = getAvailableAccount();
-      if (!account) {
-        const now = Date.now();
-        let shortestWait = Infinity;
-        for (const [, until] of job.accountFloodUntil) { shortestWait = Math.min(shortestWait, until - now); }
-        if (shortestWait < Infinity && shortestWait > 0) {
-          addJobLog(job, 'info', `⏳ انتظار ${Math.ceil(shortestWait / 1000)}s`);
-          await sleep(shortestWait + 1000);
-          account = getAvailableAccount();
-        }
-        if (!account) {
-          member.status = 'failed'; member.error = 'لا يوجد حسابات'; job.failedCount++;
-          addJobLog(job, 'error', `لا يوجد حسابات لـ ${memberLabel}`);
-          memberDone = true; break;
+  const totalCycles = job.totalCycles || 1;
+  
+  for (let cycle = 1; cycle <= totalCycles; cycle++) {
+    if (job.stopRequested) break;
+    job.currentCycle = cycle;
+    
+    if (cycle > 1) {
+      // Reset failed members for retry
+      let retriable = 0;
+      for (const m of job.members) {
+        if (m.status === 'failed') {
+          m.status = 'pending';
+          m.error = null;
+          job.failedCount--;
+          job.processed--;
+          retriable++;
         }
       }
+      if (retriable === 0) {
+        addJobLog(job, 'success', `🎯 لا يوجد أعضاء فاشلين لإعادة المحاولة، تم الانتهاء مبكراً`);
+        break;
+      }
+      addJobLog(job, 'info', `🔄 دورة ${cycle}/${totalCycles}: إعادة محاولة ${retriable} عضو فاشل...`);
+      // Cooldown between cycles
+      addJobLog(job, 'info', `⏳ انتظار 30 ثانية قبل بدء الدورة الجديدة...`);
+      for (let w = 0; w < 30; w++) { if (job.stopRequested) break; await sleep(1000); }
+      // Reset not-admin accounts for new cycle (maybe permissions changed)
+      job.notAdminAccounts.clear();
+    } else {
+      const pendingCount = job.members.filter(m => m.status === 'pending').length;
+      addJobLog(job, 'info', `بدء إضافة ${pendingCount} عضو بـ ${accounts.length} حساب (دورة ${cycle}/${totalCycles})`);
+    }
 
-      const accKey = account.phone || job.currentAccountIdx.toString();
-      job.currentAccount = account.phone;
-      let client;
+    const pendingMembers = job.members.filter(m => m.status === 'pending');
+    job.total = job.members.length; // Always show total
 
-      try {
-        client = await getClientFromSession(account.sessionString, account.apiId || 123456, account.apiHash || 'demo');
-        const { type, value } = parseGroupLink(job.targetGroup);
-        if (!value) { member.status = 'failed'; member.error = 'رابط غير صالح'; job.failedCount++; memberDone = true; try { await client.disconnect(); } catch(_){} break; }
+    for (let i = 0; i < pendingMembers.length; i++) {
+      if (job.stopRequested) { job.status = 'stopped'; break; }
+      while (job.pauseRequested && !job.stopRequested) { job.status = 'paused'; await sleep(500); }
+      if (job.stopRequested) { job.status = 'stopped'; break; }
+      job.status = 'running';
 
-        let targetEntity;
-        try {
-          if (type === 'hash') {
-            try { const cr = await client.invoke(new Api.messages.CheckChatInvite({ hash: value })); if (cr?.chat) targetEntity = cr.chat; } catch(e) {}
-            if (!targetEntity) { try { const jr = await client.invoke(new Api.messages.ImportChatInvite({ hash: value })); if (jr?.chats?.length > 0) targetEntity = jr.chats[0]; } catch(e) {} }
-          } else { targetEntity = await client.getEntity(value); }
-        } catch(e) {}
+      const member = pendingMembers[i];
+      const memberLabel = member.username ? `@${member.username}` : (member.firstName || `ID:${member.userId}`);
+      job.currentMember = memberLabel;
 
-        if (!targetEntity) { try { await client.disconnect(); } catch(_){} retries++; addJobLog(job, 'warning', `فشل الوصول للمجموعة`, account.phone); continue; }
+      let retries = 0;
+      let memberDone = false;
 
-        const isChat = targetEntity.className === 'Chat';
-
-        // Resolve user
-        let userEntity;
-        if (member.username?.trim()) {
-          try { const r = await client.invoke(new Api.contacts.ResolveUsername({ username: member.username.trim().replace('@', '') })); if (r?.users?.length > 0) userEntity = r.users[0]; } catch(e) {}
-        }
-        if (!userEntity && job.sourceGroup && member.userId) {
-          try {
-            const { type: sT, value: sV } = parseGroupLink(job.sourceGroup);
-            if (sV) {
-              let se; if (sT === 'hash') { try { const cr = await client.invoke(new Api.messages.CheckChatInvite({ hash: sV })); if (cr?.chat) se = cr.chat; } catch(e){} } else { se = await client.getEntity(sV); }
-              if (se) {
-                const p = await client.invoke(new Api.channels.GetParticipants({ channel: se, filter: new Api.ChannelParticipantsSearch({ q: '' }), offset: 0, limit: 200, hash: BigInt(0) }));
-                let f = p.users?.find(u => u.id?.toString() === member.userId.toString());
-                if (!f && member.username) { const p2 = await client.invoke(new Api.channels.GetParticipants({ channel: se, filter: new Api.ChannelParticipantsSearch({ q: member.username.substring(0, 5) }), offset: 0, limit: 200, hash: BigInt(0) })); f = p2.users?.find(u => u.id?.toString() === member.userId.toString()); }
-                if (f) userEntity = f;
-              }
-            }
-          } catch(e) {}
-        }
-        if (!userEntity && member.userId && member.accessHash && member.accessHash !== '0') {
-          try { userEntity = new Api.InputPeerUser({ userId: BigInt(member.userId), accessHash: BigInt(member.accessHash) }); } catch(e) {}
-        }
-
-        if (!userEntity) {
-          try { await client.disconnect(); } catch(_){}
-          member.status = 'skipped'; member.error = 'لا يمكن التعرف'; job.skippedCount++;
-          addJobLog(job, 'info', `⏭️ ${memberLabel}: لا يمكن التعرف`, account.phone);
-          memberDone = true; break;
-        }
-
-        let inputUser;
-        if (userEntity.className === 'User') { inputUser = new Api.InputUser({ userId: userEntity.id, accessHash: userEntity.accessHash || BigInt(0) }); }
-        else if (userEntity.className === 'InputPeerUser') { inputUser = new Api.InputUser({ userId: userEntity.userId, accessHash: userEntity.accessHash || BigInt(0) }); }
-        else { inputUser = userEntity; }
-
-        // Add with flood retry
-        let addOk = false;
-        for (let att = 0; att <= 3; att++) {
-          try {
-            let addResult;
-            if (isChat) { addResult = await client.invoke(new Api.messages.AddChatUser({ chatId: targetEntity.id, userId: inputUser, fwdLimit: 100 })); }
-            else { addResult = await client.invoke(new Api.channels.InviteToChannel({ channel: targetEntity, users: [inputUser] })); }
-            
-            // Check missingInvitees for silent failures
-            if (addResult && addResult.missingInvitees && addResult.missingInvitees.length > 0) {
-              const missed = addResult.missingInvitees[0];
-              const reason = missed.premiumWouldAllowInvite ? 'يحتاج Premium' :
-                             missed.premiumRequiredForPm ? 'يحتاج Premium للتواصل' :
-                             'خصوصية المستخدم';
-              member.status='skipped'; member.error=reason; job.skippedCount++;
-              addJobLog(job,'info',`⏭️ ${memberLabel}: ${reason}`,account.phone);
-              memberDone=true; break;
-            }
-            
-            // === POST-ADD VERIFICATION ===
-            if (!isChat) {
-              try {
-                await sleep(2000); // Wait for Telegram to process
-                const verifyResult = await client.invoke(
-                  new Api.channels.GetParticipant({ channel: targetEntity, participant: inputUser })
-                );
-                if (!verifyResult || !verifyResult.participant) {
-                  member.status='failed'; member.error='لم يُضف فعلياً'; job.failedCount++;
-                  addJobLog(job,'error',`❌ ${memberLabel}: فشل التحقق - لم يُضف فعلياً`,account.phone);
-                  memberDone=true; break;
-                }
-              } catch (vErr) {
-                const vm = vErr.message || '';
-                if (vm.includes('USER_NOT_PARTICIPANT')) {
-                  member.status='failed'; member.error='لم يُضف فعلياً'; job.failedCount++;
-                  addJobLog(job,'error',`❌ ${memberLabel}: لم يُضف فعلياً (خصوصية)`,account.phone);
-                  memberDone=true; break;
-                }
-                // Can't verify, assume success
-              }
-            }
-            addOk = true; break;
-          } catch (err) {
-            const em = err.message || '';
-            if (em.includes('FLOOD_WAIT')) { const ws = parseInt((em.match(/(\d+)/)||['60'])[0]); if (att < 3) { addJobLog(job, 'warning', `FLOOD ${ws}s`, account.phone); await sleep((ws+1)*1000); continue; } else { job.accountFloodUntil.set(accKey, Date.now()+ws*1000); retries++; break; } }
-            if (em.includes('PEER_FLOOD')) { if (att < 3) { await sleep(30000*(att+1)); continue; } job.accountFloodUntil.set(accKey, Date.now()+60000); retries++; break; }
-            if (em.includes('USER_ALREADY_PARTICIPANT')) { member.status='skipped'; member.error='موجود مسبقاً'; job.skippedCount++; addJobLog(job,'info',`⏭️ ${memberLabel} موجود`); memberDone=true; break; }
-            if (em.includes('CHAT_ADMIN_REQUIRED')||em.includes('CHAT_WRITE_FORBIDDEN')) { job.notAdminAccounts.add(accKey); addJobLog(job,'error',`${account.phone} ليس مشرفاً`); retries++; break; }
-            if (em.includes('USER_PRIVACY')||em.includes('USER_NOT_MUTUAL')||em.includes('DEACTIVATED')||em.includes('USER_CHANNELS_TOO')||em.includes('USER_BANNED')||em.includes('USER_KICKED')||em.includes('USER_ID_INVALID')) {
-              member.status='skipped'; member.error=em.substring(0,40); job.skippedCount++; addJobLog(job,'info',`⏭️ ${memberLabel}: ${em.substring(0,40)}`); memberDone=true; break;
-            }
-            member.status='failed'; member.error=em.substring(0,50); job.failedCount++; addJobLog(job,'error',`❌ ${memberLabel}: ${em.substring(0,50)}`); memberDone=true; break;
+      while (!memberDone && retries <= settings.maxRetries && !job.stopRequested) {
+        let account = getAvailableAccount();
+        if (!account) {
+          const now = Date.now();
+          let shortestWait = Infinity;
+          for (const [, until] of job.accountFloodUntil) { shortestWait = Math.min(shortestWait, until - now); }
+          if (shortestWait < Infinity && shortestWait > 0) {
+            addJobLog(job, 'info', `⏳ انتظار ${Math.ceil(shortestWait / 1000)}s`);
+            await sleep(shortestWait + 1000);
+            account = getAvailableAccount();
+          }
+          if (!account) {
+            member.status = 'failed'; member.error = 'لا يوجد حسابات'; job.failedCount++;
+            addJobLog(job, 'error', `لا يوجد حسابات لـ ${memberLabel}`);
+            memberDone = true; break;
           }
         }
-        if (addOk) { member.status='added'; job.successCount++; addJobLog(job,'success',`✅ ${memberLabel}`,account.phone); memberDone=true; }
-        try { await client.disconnect(); } catch(_){}
 
-      } catch (outerErr) {
-        if (client) { try { await client.disconnect(); } catch(_){} }
-        addJobLog(job, 'error', `خطأ: ${(outerErr.message||'').substring(0,50)}`, account.phone);
-        retries++;
+        const accKey = account.phone || job.currentAccountIdx.toString();
+        job.currentAccount = account.phone;
+        let client;
+
+        try {
+          client = await getClientFromSession(account.sessionString, account.apiId || 123456, account.apiHash || 'demo');
+          const { type, value } = parseGroupLink(job.targetGroup);
+          if (!value) { member.status = 'failed'; member.error = 'رابط غير صالح'; job.failedCount++; memberDone = true; try { await client.disconnect(); } catch(_){} break; }
+
+          let targetEntity;
+          try {
+            if (type === 'hash') {
+              try { const cr = await client.invoke(new Api.messages.CheckChatInvite({ hash: value })); if (cr?.chat) targetEntity = cr.chat; } catch(e) {}
+              if (!targetEntity) { try { const jr = await client.invoke(new Api.messages.ImportChatInvite({ hash: value })); if (jr?.chats?.length > 0) targetEntity = jr.chats[0]; } catch(e) {} }
+            } else { targetEntity = await client.getEntity(value); }
+          } catch(e) {}
+
+          if (!targetEntity) { try { await client.disconnect(); } catch(_){} retries++; addJobLog(job, 'warning', `فشل الوصول للمجموعة`, account.phone); continue; }
+
+          const isChat = targetEntity.className === 'Chat';
+
+          // Resolve user
+          let userEntity;
+          if (member.username?.trim()) {
+            try { const r = await client.invoke(new Api.contacts.ResolveUsername({ username: member.username.trim().replace('@', '') })); if (r?.users?.length > 0) userEntity = r.users[0]; } catch(e) {}
+          }
+          if (!userEntity && job.sourceGroup && member.userId) {
+            try {
+              const { type: sT, value: sV } = parseGroupLink(job.sourceGroup);
+              if (sV) {
+                let se; if (sT === 'hash') { try { const cr = await client.invoke(new Api.messages.CheckChatInvite({ hash: sV })); if (cr?.chat) se = cr.chat; } catch(e){} } else { se = await client.getEntity(sV); }
+                if (se) {
+                  const p = await client.invoke(new Api.channels.GetParticipants({ channel: se, filter: new Api.ChannelParticipantsSearch({ q: '' }), offset: 0, limit: 200, hash: BigInt(0) }));
+                  let f = p.users?.find(u => u.id?.toString() === member.userId.toString());
+                  if (!f && member.username) { const p2 = await client.invoke(new Api.channels.GetParticipants({ channel: se, filter: new Api.ChannelParticipantsSearch({ q: member.username.substring(0, 5) }), offset: 0, limit: 200, hash: BigInt(0) })); f = p2.users?.find(u => u.id?.toString() === member.userId.toString()); }
+                  if (f) userEntity = f;
+                }
+              }
+            } catch(e) {}
+          }
+          if (!userEntity && member.userId && member.accessHash && member.accessHash !== '0') {
+            try { userEntity = new Api.InputPeerUser({ userId: BigInt(member.userId), accessHash: BigInt(member.accessHash) }); } catch(e) {}
+          }
+
+          if (!userEntity) {
+            try { await client.disconnect(); } catch(_){}
+            member.status = 'skipped'; member.error = 'لا يمكن التعرف'; job.skippedCount++;
+            addJobLog(job, 'info', `⏭️ ${memberLabel}: لا يمكن التعرف`, account.phone);
+            memberDone = true; break;
+          }
+
+          let inputUser;
+          if (userEntity.className === 'User') { inputUser = new Api.InputUser({ userId: userEntity.id, accessHash: userEntity.accessHash || BigInt(0) }); }
+          else if (userEntity.className === 'InputPeerUser') { inputUser = new Api.InputUser({ userId: userEntity.userId, accessHash: userEntity.accessHash || BigInt(0) }); }
+          else { inputUser = userEntity; }
+
+          // Add with flood retry
+          let addOk = false;
+          for (let att = 0; att <= 3; att++) {
+            try {
+              let addResult;
+              if (isChat) { addResult = await client.invoke(new Api.messages.AddChatUser({ chatId: targetEntity.id, userId: inputUser, fwdLimit: 100 })); }
+              else { addResult = await client.invoke(new Api.channels.InviteToChannel({ channel: targetEntity, users: [inputUser] })); }
+              
+              // Check missingInvitees for silent failures
+              if (addResult && addResult.missingInvitees && addResult.missingInvitees.length > 0) {
+                const missed = addResult.missingInvitees[0];
+                const reason = missed.premiumWouldAllowInvite ? 'يحتاج Premium' :
+                               missed.premiumRequiredForPm ? 'يحتاج Premium للتواصل' :
+                               'خصوصية المستخدم';
+                member.status='skipped'; member.error=reason; job.skippedCount++;
+                addJobLog(job,'info',`⏭️ ${memberLabel}: ${reason}`,account.phone);
+                memberDone=true; break;
+              }
+              
+              // === POST-ADD VERIFICATION ===
+              if (!isChat) {
+                try {
+                  await sleep(1500);
+                  const verifyResult = await client.invoke(
+                    new Api.channels.GetParticipant({ channel: targetEntity, participant: inputUser })
+                  );
+                  if (!verifyResult || !verifyResult.participant) {
+                    member.status='failed'; member.error='لم يُضف فعلياً'; job.failedCount++;
+                    addJobLog(job,'error',`❌ ${memberLabel}: فشل التحقق`,account.phone);
+                    memberDone=true; break;
+                  }
+                } catch (vErr) {
+                  const vm = vErr.message || '';
+                  if (vm.includes('USER_NOT_PARTICIPANT')) {
+                    member.status='failed'; member.error='لم يُضف فعلياً (خصوصية)'; job.failedCount++;
+                    addJobLog(job,'error',`❌ ${memberLabel}: لم يُضف (خصوصية)`,account.phone);
+                    memberDone=true; break;
+                  }
+                }
+              }
+              addOk = true; break;
+            } catch (err) {
+              const em = err.message || '';
+              if (em.includes('FLOOD_WAIT')) { const ws = parseInt((em.match(/(\d+)/)||['60'])[0]); if (att < 3) { addJobLog(job, 'warning', `FLOOD ${ws}s`, account.phone); await sleep((ws+1)*1000); continue; } else { job.accountFloodUntil.set(accKey, Date.now()+ws*1000); retries++; break; } }
+              if (em.includes('PEER_FLOOD')) { if (att < 3) { await sleep(30000*(att+1)); continue; } job.accountFloodUntil.set(accKey, Date.now()+60000); retries++; break; }
+              if (em.includes('USER_ALREADY_PARTICIPANT')) { member.status='skipped'; member.error='موجود مسبقاً'; job.skippedCount++; addJobLog(job,'info',`⏭️ ${memberLabel} موجود`); memberDone=true; break; }
+              if (em.includes('CHAT_ADMIN_REQUIRED')||em.includes('CHAT_WRITE_FORBIDDEN')) { job.notAdminAccounts.add(accKey); addJobLog(job,'error',`${account.phone} ليس مشرفاً`); retries++; break; }
+              if (em.includes('USER_PRIVACY')||em.includes('USER_NOT_MUTUAL')||em.includes('DEACTIVATED')||em.includes('USER_CHANNELS_TOO')||em.includes('USER_BANNED')||em.includes('USER_KICKED')||em.includes('USER_ID_INVALID')) {
+                member.status='skipped'; member.error=em.substring(0,40); job.skippedCount++; addJobLog(job,'info',`⏭️ ${memberLabel}: ${em.substring(0,40)}`); memberDone=true; break;
+              }
+              member.status='failed'; member.error=em.substring(0,50); job.failedCount++; addJobLog(job,'error',`❌ ${memberLabel}: ${em.substring(0,50)}`); memberDone=true; break;
+            }
+          }
+          if (addOk) { member.status='added'; job.successCount++; addJobLog(job,'success',`✅ ${memberLabel}`,account.phone); memberDone=true; }
+          try { await client.disconnect(); } catch(_){}
+
+        } catch (outerErr) {
+          if (client) { try { await client.disconnect(); } catch(_){} }
+          addJobLog(job, 'error', `خطأ: ${(outerErr.message||'').substring(0,50)}`, account.phone);
+          retries++;
+        }
+      }
+
+      if (!memberDone && !job.stopRequested) { member.status='failed'; member.error='استنفذت المحاولات'; job.failedCount++; }
+      job.processed++;
+
+      if (!job.stopRequested && i < pendingMembers.length - 1) {
+        const delay = getRandomDelay();
+        for (let d = 0; d < delay; d++) {
+          if (job.stopRequested) break;
+          while (job.pauseRequested && !job.stopRequested) await sleep(500);
+          await sleep(1000);
+        }
       }
     }
 
-    if (!memberDone && !job.stopRequested) { member.status='failed'; member.error='استنفذت المحاولات'; job.failedCount++; }
-    job.processed++;
-
-    if (!job.stopRequested && i < pendingMembers.length - 1) {
-      const delay = getRandomDelay();
-      for (let d = 0; d < delay; d++) {
-        if (job.stopRequested) break;
-        while (job.pauseRequested && !job.stopRequested) await sleep(500);
-        await sleep(1000);
-      }
-    }
+    if (job.stopRequested) break;
+    
+    // Log cycle completion
+    addJobLog(job, 'success', `✅ دورة ${cycle}/${totalCycles}: ${job.successCount} نجاح، ${job.failedCount} فشل، ${job.skippedCount} تخطي`);
   }
 
   if (!job.stopRequested) job.status = 'completed';
   job.currentMember = null; job.currentAccount = null;
-  addJobLog(job, 'success', `انتهت: ${job.successCount} نجاح، ${job.failedCount} فشل، ${job.skippedCount} تخطي`);
-  console.log(`[BatchAdd ${job.id}] Done: ${job.successCount}/${job.failedCount}/${job.skippedCount}`);
+  addJobLog(job, 'success', `انتهت (${job.totalCycles} دورة): ${job.successCount} نجاح، ${job.failedCount} فشل، ${job.skippedCount} تخطي`);
+  console.log(`[BatchAdd ${job.id}] Done: ${job.successCount}/${job.failedCount}/${job.skippedCount} (${job.totalCycles} cycles)`);
   setTimeout(() => { activeBatchJobs.delete(job.id); }, 3600000);
 }
 
@@ -2143,6 +2236,7 @@ async function handleGetBatchAddStatus({ jobId }, res) {
       processed: job.processed, total: job.total,
       successCount: job.successCount, failedCount: job.failedCount, skippedCount: job.skippedCount,
       currentMember: job.currentMember, currentAccount: job.currentAccount,
+      currentCycle: job.currentCycle || 1, totalCycles: job.totalCycles || 1,
       uptime: Math.floor((Date.now() - job.startedAt) / 1000),
       logs: job.logs.slice(-50),
       members: job.members.map(m => ({ userId: m.userId, username: m.username, status: m.status, error: m.error })),
@@ -2186,7 +2280,7 @@ process.on('SIGTERM', async () => {
 
 // Start the server
 app.listen(PORT, () => {
-  console.log(`🚀 Telegram MTProto Server v2.3.0 running on port ${PORT}`);
+  console.log(`🚀 Telegram MTProto Server v2.8.0 running on port ${PORT}`);
   console.log(`📍 Health check: http://localhost:${PORT}/`);
   console.log(`🔐 Auth endpoint: POST http://localhost:${PORT}/auth`);
 });

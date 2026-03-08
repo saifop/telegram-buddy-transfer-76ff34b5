@@ -14,6 +14,7 @@ interface AddSettings {
   rotateAccounts: boolean;
   maxRetries: number;
   cooldownAfterFlood: number;
+  retryCycles: number;
 }
 
 interface UseAddMembersProps {
@@ -192,6 +193,7 @@ export function useAddMembers({
             delayMax: settings.delayMax,
             maxRetries: settings.maxRetries,
             cooldownAfterFlood: settings.cooldownAfterFlood,
+            retryCycles: settings.retryCycles || 0,
           },
         },
       });
