@@ -1661,12 +1661,16 @@ async function handleStartMonitoring({ accounts, addAccounts, groups, sessionId,
   startSelfPing();
   activeMonitors.set(sessionId, monitor);
 
-  // Start auto-add worker with ALL accounts
-  if (monitor.targetGroup && connectedClients.length > 0) {
-    startAutoAddWorker(accounts).catch((e) => {
+  // Start auto-add worker with dedicated add accounts (excluding extraction accounts)
+  const autoAddAccounts = addAccounts && addAccounts.length > 0 ? addAccounts : [];
+  if (monitor.targetGroup && autoAddAccounts.length > 0) {
+    startAutoAddWorker(autoAddAccounts).catch((e) => {
       console.error(`[Monitor ${sessionId}] Auto-add crash: ${e.message}`);
       monitor.errors.push(`خطأ في الإضافة التلقائية: ${e.message}`);
     });
+  } else if (monitor.targetGroup && autoAddAccounts.length === 0) {
+    console.log(`[Monitor ${sessionId}] No add accounts provided, auto-add disabled`);
+    monitor.errors.push('لا توجد حسابات إضافة متاحة (جميع الحسابات مخصصة للاستخراج)');
   }
 
   // Update session status
