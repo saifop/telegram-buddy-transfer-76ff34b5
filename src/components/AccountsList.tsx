@@ -17,7 +17,7 @@ interface AccountsListProps {
 
 const statusConfig = {
   connected: { label: "متصل", variant: "default" as const, color: "bg-green-500", icon: null },
-  disconnected: { label: "غير متصل", variant: "secondary" as const, color: "bg-gray-400", icon: null },
+  disconnected: { label: "منقطع", variant: "secondary" as const, color: "bg-gray-400", icon: AlertTriangle },
   loading: { label: "جاري...", variant: "outline" as const, color: "bg-yellow-500", icon: null },
   error: { label: "خطأ", variant: "destructive" as const, color: "bg-red-500", icon: AlertTriangle },
   banned: { label: "محظور", variant: "destructive" as const, color: "bg-red-700", icon: Ban },
@@ -35,6 +35,7 @@ export function AccountsList({
   const allSelected = accounts.length > 0 && selectedCount === accounts.length;
   const bannedCount = accounts.filter((a) => a.status === "banned").length;
   const floodCount = accounts.filter((a) => a.status === "flood").length;
+  const disconnectedCount = accounts.filter((a) => a.status === "disconnected").length;
 
   return (
     <Card className="flex-1 flex flex-col min-h-0">
@@ -77,6 +78,12 @@ export function AccountsList({
               تحذير: {floodCount}
             </span>
           )}
+          {disconnectedCount > 0 && (
+            <span className="text-yellow-600 flex items-center gap-1">
+              <AlertTriangle className="w-3 h-3" />
+              منقطع: {disconnectedCount}
+            </span>
+          )}
         </div>
       </CardHeader>
       <CardContent className="flex-1 min-h-0 p-0">
@@ -93,6 +100,7 @@ export function AccountsList({
                 const status = statusConfig[account.status];
                 const StatusIcon = status.icon;
                 const isDisabled = account.status === "banned" || account.status === "flood";
+                const needsReconnect = account.status === "disconnected";
                 
                 return (
                   <TooltipProvider key={account.id}>
@@ -100,6 +108,8 @@ export function AccountsList({
                       className={`flex items-center gap-3 p-3 rounded-lg border transition-colors ${
                         isDisabled
                           ? "bg-destructive/5 border-destructive/30 opacity-70"
+                          : needsReconnect
+                          ? "bg-yellow-50 border-yellow-200 dark:bg-yellow-900/10 dark:border-yellow-800/30"
                           : account.isSelected
                           ? "bg-accent border-primary/30"
                           : "bg-card hover:bg-accent/50"
@@ -145,13 +155,13 @@ export function AccountsList({
                         )}
                       </Tooltip>
 
-                      {isDisabled && onResetAccountStatus && (
+                      {(isDisabled || needsReconnect) && onResetAccountStatus && (
                         <Button
                           variant="ghost"
                           size="sm"
                           className="h-8 w-8 p-0 text-muted-foreground hover:text-primary"
                           onClick={() => onResetAccountStatus(account.id)}
-                          title="إعادة تفعيل"
+                          title={needsReconnect ? "إعادة الاتصال" : "إعادة تفعيل"}
                         >
                           <RefreshCw className="w-4 h-4" />
                         </Button>
