@@ -1345,6 +1345,9 @@ async function handleStartMonitoring({ accounts, addAccounts, groups, sessionId,
       return;
     }
     
+    // Store reference on monitor for status endpoint
+    monitor.addClients = addClients;
+    
     console.log(`[Monitor ${sessionId}] 🚀 ${addClients.length}/${allAccounts.length} accounts connected. Starting persistent cycle...`);
 
     // Pre-load existing members from first client
