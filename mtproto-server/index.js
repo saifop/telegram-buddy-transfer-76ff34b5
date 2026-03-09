@@ -2294,8 +2294,16 @@ async function runBatchAddJob(job) {
       if (!memberDone && !job.stopRequested) { member.status='failed'; member.error='استنفذت المحاولات'; job.failedCount++; }
       job.processed++;
 
+      // Smart delay: skip delay for skipped/unresolvable members, short delay for fails, full delay only for actual add attempts
       if (!job.stopRequested && i < pendingMembers.length - 1) {
-        const delay = getRandomDelay();
+        let delay;
+        if (member.status === 'skipped') {
+          delay = 0; // No delay for skipped members - they didn't touch Telegram API
+        } else if (member.status === 'failed' && !member.error?.includes('FLOOD')) {
+          delay = Math.max(1, Math.floor(getRandomDelay() / 3)); // Short delay for quick fails
+        } else {
+          delay = getRandomDelay(); // Full delay only after real add attempts
+        }
         for (let d = 0; d < delay; d++) {
           if (job.stopRequested) break;
           while (job.pauseRequested && !job.stopRequested) await sleep(500);
