@@ -161,7 +161,7 @@ export function AccountsList({
                           size="sm"
                           className="h-8 w-8 p-0 text-muted-foreground hover:text-primary"
                           onClick={() => onResetAccountStatus(account.id)}
-                          title="إعادة تفعيل"
+                          title={needsReconnect ? "إعادة الاتصال" : "إعادة تفعيل"}
                         >
                           <RefreshCw className="w-4 h-4" />
                         </Button>
