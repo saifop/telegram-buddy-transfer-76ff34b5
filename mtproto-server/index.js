@@ -1296,12 +1296,17 @@ async function handleStartMonitoring({ accounts, addAccounts, groups, sessionId,
 
   // ── Auto-add worker (multi-account rotation) ──────────────────────────
   const startAutoAddWorker = async (allAccounts) => {
-    console.log(`[Monitor ${sessionId}] Auto-add worker started with ${allAccounts.length} accounts for: ${monitor.targetGroup}`);
+    console.log(`[Monitor ${sessionId}] 🔄 Auto-add worker started with ${allAccounts.length} accounts (50 members each = ${allAccounts.length * 50} total capacity)`);
     const { type: tType, value: tValue } = parseGroupLink(monitor.targetGroup);
     if (!tValue) { monitor.errors.push('رابط المجموعة الهدف غير صالح'); return; }
 
-    // Connect all accounts and join target group
+    // Initialize persistent account tracking with 25-hour cooldown system
     const addClients = [];
+    const COOLDOWN_HOURS = 25;
+    const MEMBERS_PER_ACCOUNT = 50;
+    const COOLDOWN_MS = COOLDOWN_HOURS * 60 * 60 * 1000; // 25 hours in milliseconds
+
+    // Connect all accounts and join target group
     for (const acc of allAccounts) {
       try {
         const client = await getClientFromSession(acc.sessionString, acc.apiId || 123456, acc.apiHash || 'demo');
@@ -1316,10 +1321,22 @@ async function handleStartMonitoring({ accounts, addAccounts, groups, sessionId,
           continue;
         }
         if (!targetEntity) { try { await client.disconnect(); } catch (_) {} continue; }
-        addClients.push({ client, entity: targetEntity, phone: acc.phone, banned: false, floodUntil: 0 });
-        console.log(`[Monitor ${sessionId}] ${acc.phone} ready for auto-add`);
+        
+        // Enhanced client object with persistent cycle tracking
+        addClients.push({ 
+          client, 
+          entity: targetEntity, 
+          phone: acc.phone, 
+          banned: false, 
+          floodUntil: 0, 
+          addCount: 0, // Current cycle additions
+          totalAdded: 0, // Total lifetime additions
+          lastResetTime: Date.now(),
+          sessionData: acc
+        });
+        console.log(`[Monitor ${sessionId}] ✅ ${acc.phone} ready for auto-add (lifetime: 0/${MEMBERS_PER_ACCOUNT})`);
       } catch (e) {
-        console.log(`[Monitor ${sessionId}] ${acc.phone} connect failed: ${e.message}`);
+        console.log(`[Monitor ${sessionId}] ❌ ${acc.phone} connect failed: ${e.message}`);
       }
     }
 
@@ -1327,7 +1344,8 @@ async function handleStartMonitoring({ accounts, addAccounts, groups, sessionId,
       monitor.errors.push('فشل اتصال جميع حسابات الإضافة');
       return;
     }
-    console.log(`[Monitor ${sessionId}] ${addClients.length}/${allAccounts.length} accounts ready for adding`);
+    
+    console.log(`[Monitor ${sessionId}] 🚀 ${addClients.length}/${allAccounts.length} accounts connected. Starting persistent cycle...`);
 
     // Pre-load existing members from first client
     const existingInTarget = new Set();
@@ -1337,39 +1355,121 @@ async function handleStartMonitoring({ accounts, addAccounts, groups, sessionId,
         offset: 0, limit: 200, hash: BigInt(0),
       }));
       for (const u of (p.users || [])) existingInTarget.add(u.id?.toString());
-      console.log(`[Monitor ${sessionId}] Pre-loaded ${existingInTarget.size} existing members in target`);
+      console.log(`[Monitor ${sessionId}] 📊 Pre-loaded ${existingInTarget.size} existing members in target`);
     } catch (_) {}
 
     let currentIdx = 0;
 
+    // Enhanced getNextClient with 25-hour cycle logic
     const getNextClient = () => {
       const now = Date.now();
       for (let i = 0; i < addClients.length; i++) {
         const idx = (currentIdx + i) % addClients.length;
         const c = addClients[idx];
-        if (!c.banned && c.floodUntil <= now) {
-          currentIdx = (idx + 1) % addClients.length;
-          return c;
+        
+        // Skip banned accounts
+        if (c.banned) continue;
+        
+        // Check if account is in flood wait
+        if (c.floodUntil > now) continue;
+        
+        // Check if account reached limit and needs 25-hour cooldown
+        if (c.addCount >= MEMBERS_PER_ACCOUNT) {
+          const cooldownEnd = c.lastResetTime + COOLDOWN_MS;
+          if (now < cooldownEnd) {
+            // Still in 25-hour cooldown
+            continue;
+          } else {
+            // Reset counter and reconnect after cooldown
+            console.log(`[Monitor ${sessionId}] 🔄 ${c.phone} cooldown ended (${COOLDOWN_HOURS}h), resetting counter (${c.addCount}→0, lifetime: ${c.totalAdded})`);
+            c.addCount = 0;
+            c.lastResetTime = now;
+            c.floodUntil = 0;
+            
+            // Reconnect the client if disconnected
+            try {
+              if (c.client.disconnected) {
+                c.client = await getClientFromSession(c.sessionData.sessionString, c.sessionData.apiId || 123456, c.sessionData.apiHash || 'demo');
+                const targetEntity = tType === 'hash'
+                  ? await joinPrivateGroup(c.client, tValue, c.phone)
+                  : await joinPublicGroup(c.client, tValue, c.phone);
+                c.entity = targetEntity;
+                console.log(`[Monitor ${sessionId}] 🔌 ${c.phone} reconnected after cooldown`);
+              }
+            } catch (reconnectErr) {
+              console.log(`[Monitor ${sessionId}] ❌ ${c.phone} reconnect failed: ${reconnectErr.message}`);
+              c.banned = true;
+              continue;
+            }
+          }
         }
+        
+        currentIdx = (idx + 1) % addClients.length;
+        return c;
       }
-      return null; // all banned or in flood
+      return null; // all banned, in flood, or in cooldown
     };
 
+    // Status logging function
+    const logAccountStatus = () => {
+      const now = Date.now();
+      const activeCount = addClients.filter(c => !c.banned && c.floodUntil <= now && c.addCount < MEMBERS_PER_ACCOUNT).length;
+      const cooldownCount = addClients.filter(c => !c.banned && c.addCount >= MEMBERS_PER_ACCOUNT && (c.lastResetTime + COOLDOWN_MS) > now).length;
+      const floodCount = addClients.filter(c => !c.banned && c.floodUntil > now).length;
+      const bannedCount = addClients.filter(c => c.banned).length;
+      const totalAdded = addClients.reduce((sum, c) => sum + c.totalAdded, 0);
+      
+      console.log(`[Monitor ${sessionId}] 📊 Status: Active:${activeCount}, Cooldown:${cooldownCount}, Flood:${floodCount}, Banned:${bannedCount}, Total Added:${totalAdded}`);
+    };
+
+    // Persistent infinite loop
+    let cycleCount = 0;
     while (!monitor.stopRequested && activeMonitors.has(sessionId)) {
-      if (monitor.addQueue.length === 0) { await new Promise(r => setTimeout(r, 2000)); continue; }
+      cycleCount++;
+      
+      // Log status every 10 cycles
+      if (cycleCount % 10 === 0) {
+        logAccountStatus();
+      }
+      
+      // Check if we have members to add
+      if (monitor.addQueue.length === 0) { 
+        await new Promise(r => setTimeout(r, 5000)); 
+        continue; 
+      }
 
       const activeClient = getNextClient();
       if (!activeClient) {
-        // All accounts in flood/banned, wait and retry
-        const minWait = Math.min(...addClients.filter(c => !c.banned).map(c => c.floodUntil - Date.now()));
-        if (minWait > 0 && minWait < Infinity) {
-          console.log(`[Monitor ${sessionId}] All accounts in flood, waiting ${Math.ceil(minWait/1000)}s`);
-          await new Promise(r => setTimeout(r, Math.min(minWait + 1000, 120000)));
-        } else if (addClients.every(c => c.banned)) {
-          monitor.errors.push('جميع حسابات الإضافة محظورة');
+        // All accounts are banned, in flood, or in 25-hour cooldown
+        const now = Date.now();
+        const availableAccounts = addClients.filter(c => !c.banned);
+        
+        if (availableAccounts.length === 0) {
+          console.log(`[Monitor ${sessionId}] ⛔ All ${addClients.length} accounts are permanently banned`);
+          monitor.errors.push('جميع حسابات الإضافة محظورة نهائياً');
           return;
+        }
+        
+        // Calculate next available time
+        const nextAvailableTimes = availableAccounts.map(c => {
+          if (c.floodUntil > now) return c.floodUntil;
+          if (c.addCount >= MEMBERS_PER_ACCOUNT) return c.lastResetTime + COOLDOWN_MS;
+          return now; // Should be available now
+        });
+        
+        const nextAvailable = Math.min(...nextAvailableTimes);
+        const waitTime = nextAvailable - now;
+        
+        if (waitTime > 0) {
+          const waitHours = Math.floor(waitTime / (60 * 60 * 1000));
+          const waitMins = Math.floor((waitTime % (60 * 60 * 1000)) / (60 * 1000));
+          console.log(`[Monitor ${sessionId}] ⏳ All accounts busy, waiting ${waitHours}h ${waitMins}m for next available account...`);
+          
+          // Wait in chunks to allow for stop requests
+          const chunkTime = Math.min(waitTime, 60000); // Max 1 minute chunks
+          await new Promise(r => setTimeout(r, chunkTime));
         } else {
-          await new Promise(r => setTimeout(r, 5000));
+          await new Promise(r => setTimeout(r, 5000)); // Short wait if calculation is off
         }
         continue;
       }
@@ -1379,49 +1479,111 @@ async function handleStartMonitoring({ accounts, addAccounts, groups, sessionId,
 
       try {
         let userEntity = null;
-        if (member.username) { try { userEntity = await activeClient.client.getEntity(member.username); } catch (_) {} }
+        if (member.username) { 
+          try { userEntity = await activeClient.client.getEntity(member.username); } catch (_) {} 
+        }
         if (!userEntity && member.accessHash && member.accessHash !== '0') {
-          try { userEntity = new Api.InputPeerUser({ userId: BigInt(member.userId), accessHash: BigInt(member.accessHash) }); } catch (_) {}
+          try { 
+            userEntity = new Api.InputPeerUser({ 
+              userId: BigInt(member.userId), 
+              accessHash: BigInt(member.accessHash) 
+            }); 
+          } catch (_) {}
         }
         if (!userEntity) { monitor.membersFailed++; continue; }
 
-        const result = await activeClient.client.invoke(new Api.channels.InviteToChannel({ channel: activeClient.entity, users: [userEntity] }));
+        const result = await activeClient.client.invoke(new Api.channels.InviteToChannel({ 
+          channel: activeClient.entity, 
+          users: [userEntity] 
+        }));
+        
         if (result?.missingInvitees?.length > 0) {
           monitor.membersFailed++;
         } else {
+          // Verification delay
           await new Promise(r => setTimeout(r, 1500));
+          
           try {
-            await activeClient.client.invoke(new Api.channels.GetParticipant({ channel: activeClient.entity, participant: userEntity }));
+            await activeClient.client.invoke(new Api.channels.GetParticipant({ 
+              channel: activeClient.entity, 
+              participant: userEntity 
+            }));
             monitor.membersAdded++;
+            activeClient.addCount++;
+            activeClient.totalAdded++;
             existingInTarget.add(member.userId);
-            console.log(`[Monitor ${sessionId}] ✅ ${activeClient.phone} added ${member.username || member.userId}`);
+            
+            console.log(`[Monitor ${sessionId}] ✅ ${activeClient.phone} added ${member.username || member.userId} (${activeClient.addCount}/${MEMBERS_PER_ACCOUNT}, lifetime: ${activeClient.totalAdded})`);
+            
+            // Check if account reached limit
+            if (activeClient.addCount >= MEMBERS_PER_ACCOUNT) {
+              activeClient.lastResetTime = Date.now();
+              console.log(`[Monitor ${sessionId}] 🔄 ${activeClient.phone} reached limit (${MEMBERS_PER_ACCOUNT}), entering ${COOLDOWN_HOURS}h cooldown...`);
+              
+              // Disconnect client to save resources during cooldown
+              try { await activeClient.client.disconnect(); } catch (_) {}
+            }
+            
           } catch (vErr) {
-            if ((vErr.message||'').includes('USER_NOT_PARTICIPANT')) monitor.membersFailed++;
-            else { monitor.membersAdded++; existingInTarget.add(member.userId); }
+            if ((vErr.message||'').includes('USER_NOT_PARTICIPANT')) {
+              monitor.membersFailed++;
+            } else { 
+              monitor.membersAdded++; 
+              activeClient.addCount++;
+              activeClient.totalAdded++;
+              existingInTarget.add(member.userId); 
+            }
           }
         }
+        
+        // Standard delay between additions
         await new Promise(r => setTimeout(r, 5000));
+        
       } catch (err) {
         const msg = err.message || '';
-        if (msg.includes('USER_ALREADY_PARTICIPANT')) { existingInTarget.add(member.userId); }
+        
+        if (msg.includes('USER_ALREADY_PARTICIPANT')) { 
+          existingInTarget.add(member.userId); 
+        }
         else if (msg.includes('FLOOD_WAIT')) {
           const ws = parseInt((msg.match(/(\d+)/)||[])[1]) || 60;
           activeClient.floodUntil = Date.now() + (ws + 1) * 1000;
-          monitor.addQueue.unshift(member);
-          console.log(`[Monitor ${sessionId}] ⏳ ${activeClient.phone} flood wait ${ws}s, rotating...`);
-        } else if (msg.includes('USER_BANNED_IN_CHANNEL') || msg.includes('CHAT_ADMIN_REQUIRED') || msg.includes('CHAT_WRITE_FORBIDDEN')) {
+          monitor.addQueue.unshift(member); // Return member to queue
+          console.log(`[Monitor ${sessionId}] ⏳ ${activeClient.phone} flood wait ${ws}s, will retry...`);
+          
+          // If flood wait is too long, trigger 25-hour cooldown
+          if (ws > 3600) { // More than 1 hour flood
+            activeClient.addCount = MEMBERS_PER_ACCOUNT; // Trigger cooldown
+            activeClient.lastResetTime = Date.now();
+            console.log(`[Monitor ${sessionId}] 🔄 ${activeClient.phone} long flood (${ws}s), entering ${COOLDOWN_HOURS}h cooldown...`);
+          }
+        }
+        else if (msg.includes('USER_BANNED_IN_CHANNEL') || msg.includes('CHAT_ADMIN_REQUIRED') || msg.includes('CHAT_WRITE_FORBIDDEN')) {
           activeClient.banned = true;
-          monitor.addQueue.unshift(member);
+          monitor.addQueue.unshift(member); // Return member to queue
           monitor.errors.push(`${activeClient.phone}: محظور من الإضافة`);
-          console.log(`[Monitor ${sessionId}] 🚫 ${activeClient.phone} banned from adding`);
-        } else if (msg.includes('USER_PRIVACY') || msg.includes('INPUT_USER_DEACTIVATED') || msg.includes('USER_BANNED')) {
+          console.log(`[Monitor ${sessionId}] 🚫 ${activeClient.phone} permanently banned from adding`);
+        }
+        else if (msg.includes('USER_PRIVACY') || msg.includes('INPUT_USER_DEACTIVATED') || msg.includes('USER_BANNED')) {
           monitor.membersFailed++;
-        } else { monitor.membersFailed++; console.log(`[Monitor ${sessionId}] ${activeClient.phone} add err: ${msg}`); }
+        }
+        else { 
+          monitor.membersFailed++; 
+          console.log(`[Monitor ${sessionId}] ❌ ${activeClient.phone} add error: ${msg.substring(0, 50)}`); 
+        }
       }
     }
 
-    // Cleanup add clients
-    for (const c of addClients) { try { await c.client.disconnect(); } catch (_) {} }
+    console.log(`[Monitor ${sessionId}] 🔄 Auto-add worker stopped (processed ${cycleCount} cycles)`);
+    
+    // Cleanup: Disconnect all connected clients
+    for (const c of addClients) { 
+      try { 
+        if (!c.client.disconnected) {
+          await c.client.disconnect(); 
+        }
+      } catch (_) {} 
+    }
   };
 
   // ── Connect accounts ──────────────────────────────────────────────────
