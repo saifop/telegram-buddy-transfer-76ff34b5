@@ -100,6 +100,7 @@ export function AccountsList({
                 const status = statusConfig[account.status];
                 const StatusIcon = status.icon;
                 const isDisabled = account.status === "banned" || account.status === "flood";
+                const needsReconnect = account.status === "disconnected";
                 
                 return (
                   <TooltipProvider key={account.id}>
