@@ -35,6 +35,7 @@ export function AccountsList({
   const allSelected = accounts.length > 0 && selectedCount === accounts.length;
   const bannedCount = accounts.filter((a) => a.status === "banned").length;
   const floodCount = accounts.filter((a) => a.status === "flood").length;
+  const disconnectedCount = accounts.filter((a) => a.status === "disconnected").length;
 
   return (
     <Card className="flex-1 flex flex-col min-h-0">
