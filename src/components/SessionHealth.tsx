@@ -207,7 +207,6 @@ export function SessionHealth({ accounts, onUpdateAccountStatus }: SessionHealth
             <Switch
               checked={isEnabled}
               onCheckedChange={setIsEnabled}
-              size="sm"
             />
           </div>
         </div>
