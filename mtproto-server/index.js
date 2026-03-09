@@ -2386,7 +2386,7 @@ process.on('SIGTERM', async () => {
 
 // Start the server
 app.listen(PORT, () => {
-  console.log(`🚀 Telegram MTProto Server v2.8.0 running on port ${PORT}`);
+  console.log(`🚀 Telegram MTProto Server v2.9.0 running on port ${PORT}`);
   console.log(`📍 Health check: http://localhost:${PORT}/`);
   console.log(`🔐 Auth endpoint: POST http://localhost:${PORT}/auth`);
 });
