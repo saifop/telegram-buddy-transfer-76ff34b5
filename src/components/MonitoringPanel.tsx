@@ -18,10 +18,22 @@ import {
   RefreshCw,
   CheckSquare,
   Globe,
+  Shield,
+  Ban,
+  Zap,
+  Timer,
+  CheckCircle,
 } from "lucide-react";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Switch } from "@/components/ui/switch";
 import { toast } from "sonner";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+} from "@/components/ui/dialog";
 
 interface MonitoringPanelProps {
   accounts: TelegramAccount[];
