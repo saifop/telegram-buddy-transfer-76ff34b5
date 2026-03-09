@@ -18,10 +18,22 @@ import {
   RefreshCw,
   CheckSquare,
   Globe,
+  Shield,
+  Ban,
+  Zap,
+  Timer,
+  CheckCircle,
 } from "lucide-react";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Switch } from "@/components/ui/switch";
 import { toast } from "sonner";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+} from "@/components/ui/dialog";
 
 interface MonitoringPanelProps {
   accounts: TelegramAccount[];
@@ -75,6 +87,14 @@ export function MonitoringPanel({ accounts }: MonitoringPanelProps) {
     connectedAccounts?: number;
     errors?: string[];
     groups?: string | string[];
+    addAccountsStatus?: Array<{
+      phone: string;
+      status: "active" | "banned" | "flood" | "cooldown";
+      addCount: number;
+      totalAdded: number;
+      remainingMs: number;
+      remainingFormatted: string | null;
+    }>;
   } | null>(null);
 
   const connectedAccounts = accounts.filter(
@@ -424,6 +444,76 @@ export function MonitoringPanel({ accounts }: MonitoringPanelProps) {
                       ))}
                     </ScrollArea>
                   </div>
+                )}
+
+                {/* Account Status Button */}
+                {liveStatus?.addAccountsStatus && liveStatus.addAccountsStatus.length > 0 && (
+                  <Dialog>
+                    <DialogTrigger asChild>
+                      <Button variant="outline" size="sm" className="w-full mt-2 text-xs gap-1">
+                        <Shield className="w-3 h-3" />
+                        حالة حسابات الإضافة ({liveStatus.addAccountsStatus.length})
+                        {(() => {
+                          const active = liveStatus.addAccountsStatus.filter(a => a.status === 'active').length;
+                          const blocked = liveStatus.addAccountsStatus.length - active;
+                          return blocked > 0 ? (
+                            <Badge variant="destructive" className="text-[10px] px-1 py-0 mr-1">{blocked} متوقف</Badge>
+                          ) : (
+                            <Badge variant="default" className="text-[10px] px-1 py-0 mr-1">الكل نشط</Badge>
+                          );
+                        })()}
+                      </Button>
+                    </DialogTrigger>
+                    <DialogContent className="max-w-md" dir="rtl">
+                      <DialogHeader>
+                        <DialogTitle className="flex items-center gap-2 text-sm">
+                          <Shield className="w-4 h-4" />
+                          حالة حسابات الإضافة
+                        </DialogTitle>
+                      </DialogHeader>
+                      <ScrollArea className="max-h-96">
+                        <div className="space-y-2">
+                          {liveStatus.addAccountsStatus.map((acc, i) => {
+                            const statusConfig = {
+                              active: { label: "نشط", icon: CheckCircle, color: "text-green-500", bg: "bg-green-500/10 border-green-500/30" },
+                              banned: { label: "محظور (تبريد)", icon: Ban, color: "text-destructive", bg: "bg-destructive/10 border-destructive/30" },
+                              flood: { label: "تحذير فلود", icon: Zap, color: "text-orange-500", bg: "bg-orange-500/10 border-orange-500/30" },
+                              cooldown: { label: "فترة تبريد", icon: Timer, color: "text-yellow-500", bg: "bg-yellow-500/10 border-yellow-500/30" },
+                            };
+                            const config = statusConfig[acc.status];
+                            const Icon = config.icon;
+
+                            return (
+                              <div key={i} className={`p-3 rounded-lg border ${config.bg}`}>
+                                <div className="flex items-center justify-between">
+                                  <div className="flex items-center gap-2">
+                                    <Icon className={`w-4 h-4 ${config.color}`} />
+                                    <span className="text-sm font-medium" dir="ltr">{acc.phone}</span>
+                                  </div>
+                                  <Badge variant="outline" className="text-[10px]">
+                                    {config.label}
+                                  </Badge>
+                                </div>
+                                <div className="mt-1.5 flex items-center gap-3 text-xs text-muted-foreground">
+                                  <span>أضاف: {acc.addCount}/50</span>
+                                  <span>الإجمالي: {acc.totalAdded}</span>
+                                  {acc.remainingFormatted && (
+                                    <span className={`flex items-center gap-1 ${config.color}`}>
+                                      <Clock className="w-3 h-3" />
+                                      {acc.remainingFormatted}
+                                    </span>
+                                  )}
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </ScrollArea>
+                      <div className="mt-2 p-2 rounded bg-muted/50 text-[10px] text-muted-foreground">
+                        💡 الحسابات المحظورة تدخل تبريد 25 ساعة تلقائياً ثم تعود للعمل. المراقبة والاستخراج تستمر بدون توقف.
+                      </div>
+                    </DialogContent>
+                  </Dialog>
                 )}
               </div>
               <div className="flex gap-2">

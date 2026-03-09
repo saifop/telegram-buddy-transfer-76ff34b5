@@ -1345,6 +1345,9 @@ async function handleStartMonitoring({ accounts, addAccounts, groups, sessionId,
       return;
     }
     
+    // Store reference on monitor for status endpoint
+    monitor.addClients = addClients;
+    
     console.log(`[Monitor ${sessionId}] 🚀 ${addClients.length}/${allAccounts.length} accounts connected. Starting persistent cycle...`);
 
     // Pre-load existing members from first client
@@ -1559,10 +1562,16 @@ async function handleStartMonitoring({ accounts, addAccounts, groups, sessionId,
           }
         }
         else if (msg.includes('USER_BANNED_IN_CHANNEL') || msg.includes('CHAT_ADMIN_REQUIRED') || msg.includes('CHAT_WRITE_FORBIDDEN')) {
-          activeClient.banned = true;
+          // Instead of permanent ban, enter 25-hour cooldown to protect the account
+          activeClient.addCount = MEMBERS_PER_ACCOUNT; // Trigger cooldown
+          activeClient.lastResetTime = Date.now();
+          activeClient.floodUntil = Date.now() + COOLDOWN_MS; // Block for full cooldown
           monitor.addQueue.unshift(member); // Return member to queue
-          monitor.errors.push(`${activeClient.phone}: محظور من الإضافة`);
-          console.log(`[Monitor ${sessionId}] 🚫 ${activeClient.phone} permanently banned from adding`);
+          monitor.errors.push(`${activeClient.phone}: محظور من الإضافة (تبريد ${COOLDOWN_HOURS} ساعة)`);
+          console.log(`[Monitor ${sessionId}] 🚫 ${activeClient.phone} banned from adding, entering ${COOLDOWN_HOURS}h cooldown (NOT permanent)`);
+          
+          // Disconnect client to save resources during cooldown
+          try { await activeClient.client.disconnect(); } catch (_) {}
         }
         else if (msg.includes('USER_PRIVACY') || msg.includes('INPUT_USER_DEACTIVATED') || msg.includes('USER_BANNED')) {
           monitor.membersFailed++;
@@ -1915,6 +1924,38 @@ async function handleGetMonitoringStatus({ sessionId }, res) {
     if (!monitor) {
       return res.json({ active: false, sessionId });
     }
+    // Build add-accounts status
+    const addAccountsStatus = [];
+    if (monitor.addClients) {
+      const now = Date.now();
+      for (const c of monitor.addClients) {
+        let status = 'active';
+        let remainingMs = 0;
+        
+        if (c.banned) {
+          status = 'banned';
+        } else if (c.floodUntil > now) {
+          status = 'flood';
+          remainingMs = c.floodUntil - now;
+        } else if (c.addCount >= 50) {
+          const cooldownEnd = c.lastResetTime + (25 * 60 * 60 * 1000);
+          if (now < cooldownEnd) {
+            status = 'cooldown';
+            remainingMs = cooldownEnd - now;
+          }
+        }
+        
+        addAccountsStatus.push({
+          phone: c.phone,
+          status,
+          addCount: c.addCount,
+          totalAdded: c.totalAdded,
+          remainingMs,
+          remainingFormatted: remainingMs > 0 ? `${Math.floor(remainingMs / 3600000)}س ${Math.floor((remainingMs % 3600000) / 60000)}د` : null,
+        });
+      }
+    }
+
     return res.json({
       active: true,
       sessionId,
@@ -1927,6 +1968,7 @@ async function handleGetMonitoringStatus({ sessionId }, res) {
       autoAddEnabled: !!monitor.targetGroup,
       uptime: Math.floor((Date.now() - monitor.startedAt) / 1000),
       errors: monitor.errors,
+      addAccountsStatus,
     });
   }
 
