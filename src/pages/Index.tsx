@@ -13,8 +13,6 @@ import { AddMembersPanel } from "@/components/AddMembersPanel";
 import { InlineExtractor } from "@/components/InlineExtractor";
 import { MonitoringPanel } from "@/components/MonitoringPanel";
 import { ExtractedMembersFile } from "@/components/ExtractedMembersFile";
-import { SessionHealth } from "@/components/SessionHealth";
-import { ForceRestart } from "@/components/ForceRestart";
 import { FiveSimPanel } from "@/components/FiveSimPanel";
 import { Button } from "@/components/ui/button";
 import { Moon, Sun } from "lucide-react";
@@ -306,17 +304,6 @@ const Index = () => {
             </div>
           </header>
 
-          {/* Session Health Monitor */}
-          <SessionHealth 
-            accounts={accounts}
-            onUpdateAccountStatus={handleUpdateAccountStatus}
-          />
-          
-          {/* Force Restart */}
-          <ForceRestart
-            accounts={accounts}
-            onUpdateAccountStatus={handleUpdateAccountStatus}
-          />
 
           {/* Control Bar */}
           <ControlBar
