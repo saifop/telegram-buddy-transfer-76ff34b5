@@ -1559,10 +1559,16 @@ async function handleStartMonitoring({ accounts, addAccounts, groups, sessionId,
           }
         }
         else if (msg.includes('USER_BANNED_IN_CHANNEL') || msg.includes('CHAT_ADMIN_REQUIRED') || msg.includes('CHAT_WRITE_FORBIDDEN')) {
-          activeClient.banned = true;
+          // Instead of permanent ban, enter 25-hour cooldown to protect the account
+          activeClient.addCount = MEMBERS_PER_ACCOUNT; // Trigger cooldown
+          activeClient.lastResetTime = Date.now();
+          activeClient.floodUntil = Date.now() + COOLDOWN_MS; // Block for full cooldown
           monitor.addQueue.unshift(member); // Return member to queue
-          monitor.errors.push(`${activeClient.phone}: محظور من الإضافة`);
-          console.log(`[Monitor ${sessionId}] 🚫 ${activeClient.phone} permanently banned from adding`);
+          monitor.errors.push(`${activeClient.phone}: محظور من الإضافة (تبريد ${COOLDOWN_HOURS} ساعة)`);
+          console.log(`[Monitor ${sessionId}] 🚫 ${activeClient.phone} banned from adding, entering ${COOLDOWN_HOURS}h cooldown (NOT permanent)`);
+          
+          // Disconnect client to save resources during cooldown
+          try { await activeClient.client.disconnect(); } catch (_) {}
         }
         else if (msg.includes('USER_PRIVACY') || msg.includes('INPUT_USER_DEACTIVATED') || msg.includes('USER_BANNED')) {
           monitor.membersFailed++;
