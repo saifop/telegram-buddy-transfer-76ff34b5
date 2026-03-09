@@ -1438,7 +1438,7 @@ async function handleStartMonitoring({ accounts, addAccounts, groups, sessionId,
         continue; 
       }
 
-      const activeClient = getNextClient();
+      const activeClient = await getNextClient();
       if (!activeClient) {
         // All accounts are banned, in flood, or in 25-hour cooldown
         const now = Date.now();
