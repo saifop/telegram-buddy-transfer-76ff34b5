@@ -87,6 +87,14 @@ export function MonitoringPanel({ accounts }: MonitoringPanelProps) {
     connectedAccounts?: number;
     errors?: string[];
     groups?: string | string[];
+    addAccountsStatus?: Array<{
+      phone: string;
+      status: "active" | "banned" | "flood" | "cooldown";
+      addCount: number;
+      totalAdded: number;
+      remainingMs: number;
+      remainingFormatted: string | null;
+    }>;
   } | null>(null);
 
   const connectedAccounts = accounts.filter(
