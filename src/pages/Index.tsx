@@ -304,17 +304,6 @@ const Index = () => {
             </div>
           </header>
 
-          {/* Session Health Monitor */}
-          <SessionHealth 
-            accounts={accounts}
-            onUpdateAccountStatus={handleUpdateAccountStatus}
-          />
-          
-          {/* Force Restart */}
-          <ForceRestart
-            accounts={accounts}
-            onUpdateAccountStatus={handleUpdateAccountStatus}
-          />
 
           {/* Control Bar */}
           <ControlBar
