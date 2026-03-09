@@ -2353,6 +2353,9 @@ async function runBatchAddJob(job) {
     addJobLog(job, 'success', `✅ دورة ${cycle}/${totalCycles}: ${job.successCount} نجاح، ${job.failedCount} فشل، ${job.skippedCount} تخطي`);
   }
 
+  // Cleanup all pooled connections
+  await cleanupPool();
+  
   if (!job.stopRequested) job.status = 'completed';
   job.currentMember = null; job.currentAccount = null;
   addJobLog(job, 'success', `انتهت (${job.totalCycles} دورة): ${job.successCount} نجاح، ${job.failedCount} فشل، ${job.skippedCount} تخطي`);
