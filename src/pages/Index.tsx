@@ -305,6 +305,12 @@ const Index = () => {
             </div>
           </header>
 
+          {/* Session Health Monitor */}
+          <SessionHealth 
+            accounts={accounts}
+            onUpdateAccountStatus={handleUpdateAccountStatus}
+          />
+
           {/* Control Bar */}
           <ControlBar
             status={operationStatus}
