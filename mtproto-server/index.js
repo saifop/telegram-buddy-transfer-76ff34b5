@@ -1921,6 +1921,38 @@ async function handleGetMonitoringStatus({ sessionId }, res) {
     if (!monitor) {
       return res.json({ active: false, sessionId });
     }
+    // Build add-accounts status
+    const addAccountsStatus = [];
+    if (monitor.addClients) {
+      const now = Date.now();
+      for (const c of monitor.addClients) {
+        let status = 'active';
+        let remainingMs = 0;
+        
+        if (c.banned) {
+          status = 'banned';
+        } else if (c.floodUntil > now) {
+          status = 'flood';
+          remainingMs = c.floodUntil - now;
+        } else if (c.addCount >= 50) {
+          const cooldownEnd = c.lastResetTime + (25 * 60 * 60 * 1000);
+          if (now < cooldownEnd) {
+            status = 'cooldown';
+            remainingMs = cooldownEnd - now;
+          }
+        }
+        
+        addAccountsStatus.push({
+          phone: c.phone,
+          status,
+          addCount: c.addCount,
+          totalAdded: c.totalAdded,
+          remainingMs,
+          remainingFormatted: remainingMs > 0 ? `${Math.floor(remainingMs / 3600000)}س ${Math.floor((remainingMs % 3600000) / 60000)}د` : null,
+        });
+      }
+    }
+
     return res.json({
       active: true,
       sessionId,
@@ -1933,6 +1965,7 @@ async function handleGetMonitoringStatus({ sessionId }, res) {
       autoAddEnabled: !!monitor.targetGroup,
       uptime: Math.floor((Date.now() - monitor.startedAt) / 1000),
       errors: monitor.errors,
+      addAccountsStatus,
     });
   }
 
