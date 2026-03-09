@@ -108,6 +108,8 @@ export function AccountsList({
                       className={`flex items-center gap-3 p-3 rounded-lg border transition-colors ${
                         isDisabled
                           ? "bg-destructive/5 border-destructive/30 opacity-70"
+                          : needsReconnect
+                          ? "bg-yellow-50 border-yellow-200 dark:bg-yellow-900/10 dark:border-yellow-800/30"
                           : account.isSelected
                           ? "bg-accent border-primary/30"
                           : "bg-card hover:bg-accent/50"
