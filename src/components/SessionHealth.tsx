@@ -117,23 +117,56 @@ export function SessionHealth({ accounts, onUpdateAccountStatus }: SessionHealth
       });
 
       // Wait a moment
-      await new Promise(resolve => setTimeout(resolve, 2000));
+      await new Promise(resolve => setTimeout(resolve, 3000));
 
-      // Restart monitoring with all accounts
-      const selectedAccounts = accounts.filter(a => a.isSelected);
-      if (selectedAccounts.length === 0) return;
+      // Get selected accounts with complete data
+      const selectedAccounts = accounts.filter(a => 
+        a.isSelected && 
+        a.sessionString && 
+        a.apiId && 
+        a.apiHash &&
+        a.status !== "banned"
+      );
+      
+      if (selectedAccounts.length === 0) {
+        console.log("لا توجد حسابات صالحة لإعادة التشغيل");
+        return;
+      }
 
-      await supabase.functions.invoke("telegram-auth", {
+      console.log(`إعادة تشغيل بـ ${selectedAccounts.length} حساب`);
+
+      // Restart monitoring with complete account data
+      const newSessionId = crypto.randomUUID();
+      const { data, error } = await supabase.functions.invoke("telegram-auth", {
         body: {
           action: "startMonitoring",
-          accounts: selectedAccounts.map(a => ({ phone: a.phone })),
+          accounts: selectedAccounts.map(a => ({ 
+            phone: a.phone,
+            sessionString: a.sessionString,
+            apiId: a.apiId,
+            apiHash: a.apiHash
+          })),
           groups: ["__ALL__"],
           addAccounts: true,
-          sessionId: crypto.randomUUID()
+          sessionId: newSessionId,
+          targetGroup: "", // Add default empty target
+          supabaseUrl: import.meta.env.VITE_SUPABASE_URL,
+          supabaseKey: import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY
         }
       });
 
-      console.log("تم إعادة تشغيل المراقبة تلقائياً");
+      if (error) throw error;
+      
+      console.log("تم إعادة تشغيل المراقبة تلقائياً بنجاح");
+      
+      // Update health result with new session
+      setHealthResult(prev => ({
+        ...prev,
+        sessionId: newSessionId,
+        isActive: true,
+        connectedAccounts: selectedAccounts.length
+      }));
+
     } catch (error) {
       console.error("فشل إعادة التشغيل التلقائي:", error);
     }
