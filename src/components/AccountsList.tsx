@@ -17,7 +17,7 @@ interface AccountsListProps {
 
 const statusConfig = {
   connected: { label: "متصل", variant: "default" as const, color: "bg-green-500", icon: null },
-  disconnected: { label: "غير متصل", variant: "secondary" as const, color: "bg-gray-400", icon: null },
+  disconnected: { label: "منقطع", variant: "secondary" as const, color: "bg-gray-400", icon: AlertTriangle },
   loading: { label: "جاري...", variant: "outline" as const, color: "bg-yellow-500", icon: null },
   error: { label: "خطأ", variant: "destructive" as const, color: "bg-red-500", icon: AlertTriangle },
   banned: { label: "محظور", variant: "destructive" as const, color: "bg-red-700", icon: Ban },
