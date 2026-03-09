@@ -155,7 +155,7 @@ export function AccountsList({
                         )}
                       </Tooltip>
 
-                      {isDisabled && onResetAccountStatus && (
+                      {(isDisabled || needsReconnect) && onResetAccountStatus && (
                         <Button
                           variant="ghost"
                           size="sm"
