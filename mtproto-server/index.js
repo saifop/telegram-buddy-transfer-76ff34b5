@@ -1361,7 +1361,7 @@ async function handleStartMonitoring({ accounts, addAccounts, groups, sessionId,
     let currentIdx = 0;
 
     // Enhanced getNextClient with 25-hour cycle logic
-    const getNextClient = () => {
+    const getNextClient = async () => {
       const now = Date.now();
       for (let i = 0; i < addClients.length; i++) {
         const idx = (currentIdx + i) % addClients.length;
@@ -1438,7 +1438,7 @@ async function handleStartMonitoring({ accounts, addAccounts, groups, sessionId,
         continue; 
       }
 
-      const activeClient = getNextClient();
+      const activeClient = await getNextClient();
       if (!activeClient) {
         // All accounts are banned, in flood, or in 25-hour cooldown
         const now = Date.now();
