@@ -287,7 +287,7 @@ export function SessionHealth({ accounts, onUpdateAccountStatus }: SessionHealth
             فحص يدوي
           </Button>
           
-          {healthResult.connectedAccounts < healthResult.totalAccounts * 0.8 && healthResult.sessionId && (
+          {healthResult.connectedAccounts < healthResult.totalAccounts * 0.8 && healthResult.totalAccounts > 0 && (
             <Button
               variant="outline" 
               size="sm"

@@ -311,6 +311,12 @@ const Index = () => {
             accounts={accounts}
             onUpdateAccountStatus={handleUpdateAccountStatus}
           />
+          
+          {/* Force Restart */}
+          <ForceRestart
+            accounts={accounts}
+            onUpdateAccountStatus={handleUpdateAccountStatus}
+          />
 
           {/* Control Bar */}
           <ControlBar
