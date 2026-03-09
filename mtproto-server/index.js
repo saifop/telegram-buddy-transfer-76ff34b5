@@ -2022,6 +2022,53 @@ async function runBatchAddJob(job) {
   const sleep = ms => new Promise(r => setTimeout(r, ms));
   const getRandomDelay = () => Math.floor(Math.random() * (settings.delayMax - settings.delayMin + 1)) + settings.delayMin;
 
+  // === CLIENT POOL: reuse connections instead of connect/disconnect per member ===
+  const clientPool = new Map(); // accKey -> { client, targetEntity, isChat }
+  
+  async function getPooledClient(account) {
+    const accKey = account.phone || 'unknown';
+    const existing = clientPool.get(accKey);
+    if (existing) {
+      try {
+        // Quick check if still connected
+        if (!existing.client.disconnected) return existing;
+      } catch(_) {}
+      // Reconnect if disconnected
+      clientPool.delete(accKey);
+    }
+    
+    try {
+      const client = await getClientFromSession(account.sessionString, account.apiId || 123456, account.apiHash || 'demo');
+      const { type, value } = parseGroupLink(job.targetGroup);
+      if (!value) return null;
+      
+      let targetEntity;
+      try {
+        if (type === 'hash') {
+          try { const cr = await client.invoke(new Api.messages.CheckChatInvite({ hash: value })); if (cr?.chat) targetEntity = cr.chat; } catch(e) {}
+          if (!targetEntity) { try { const jr = await client.invoke(new Api.messages.ImportChatInvite({ hash: value })); if (jr?.chats?.length > 0) targetEntity = jr.chats[0]; } catch(e) {} }
+        } else { targetEntity = await client.getEntity(value); }
+      } catch(e) {}
+      
+      if (!targetEntity) { try { await client.disconnect(); } catch(_){} return null; }
+      
+      const isChat = targetEntity.className === 'Chat';
+      const poolEntry = { client, targetEntity, isChat };
+      clientPool.set(accKey, poolEntry);
+      return poolEntry;
+    } catch(e) {
+      addJobLog(job, 'warning', `فشل اتصال ${accKey}: ${(e.message||'').substring(0,30)}`, accKey);
+      return null;
+    }
+  }
+  
+  async function cleanupPool() {
+    for (const [key, entry] of clientPool) {
+      try { await entry.client.disconnect(); } catch(_) {}
+    }
+    clientPool.clear();
+  }
+
   const getAvailableAccount = () => {
     const now = Date.now();
     for (let i = 0; i < accounts.length; i++) {
