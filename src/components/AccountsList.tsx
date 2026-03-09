@@ -78,6 +78,12 @@ export function AccountsList({
               تحذير: {floodCount}
             </span>
           )}
+          {disconnectedCount > 0 && (
+            <span className="text-yellow-600 flex items-center gap-1">
+              <AlertTriangle className="w-3 h-3" />
+              منقطع: {disconnectedCount}
+            </span>
+          )}
         </div>
       </CardHeader>
       <CardContent className="flex-1 min-h-0 p-0">
