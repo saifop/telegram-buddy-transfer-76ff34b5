@@ -1482,6 +1482,7 @@ async function handleStartMonitoring({ accounts, addAccounts, groups, sessionId,
 
       try {
         let userEntity = null;
+        // Only use username-based resolution for reliable adding
         if (member.username) { 
           try { userEntity = await activeClient.client.getEntity(member.username); } catch (_) {} 
         }
@@ -1504,13 +1505,25 @@ async function handleStartMonitoring({ accounts, addAccounts, groups, sessionId,
           monitor.membersFailed++;
         } else {
           // Verification delay
-          await new Promise(r => setTimeout(r, 1500));
+          await new Promise(r => setTimeout(r, 2000));
           
+          let verified = false;
           try {
-            await activeClient.client.invoke(new Api.channels.GetParticipant({ 
+            const vResult = await activeClient.client.invoke(new Api.channels.GetParticipant({ 
               channel: activeClient.entity, 
               participant: userEntity 
             }));
+            if (vResult && vResult.participant) {
+              verified = true;
+            }
+          } catch (vErr) {
+            // ANY verification error = not added (including timeouts, peer errors, etc.)
+            const vm = vErr.message || '';
+            console.log(`[Monitor ${sessionId}] ⚠️ Verification failed for ${member.username || member.userId}: ${vm.substring(0, 60)}`);
+            verified = false;
+          }
+          
+          if (verified) {
             monitor.membersAdded++;
             activeClient.addCount++;
             activeClient.totalAdded++;
@@ -1522,20 +1535,11 @@ async function handleStartMonitoring({ accounts, addAccounts, groups, sessionId,
             if (activeClient.addCount >= MEMBERS_PER_ACCOUNT) {
               activeClient.lastResetTime = Date.now();
               console.log(`[Monitor ${sessionId}] 🔄 ${activeClient.phone} reached limit (${MEMBERS_PER_ACCOUNT}), entering ${COOLDOWN_HOURS}h cooldown...`);
-              
-              // Disconnect client to save resources during cooldown
               try { await activeClient.client.disconnect(); } catch (_) {}
             }
-            
-          } catch (vErr) {
-            if ((vErr.message||'').includes('USER_NOT_PARTICIPANT')) {
-              monitor.membersFailed++;
-            } else { 
-              monitor.membersAdded++; 
-              activeClient.addCount++;
-              activeClient.totalAdded++;
-              existingInTarget.add(member.userId); 
-            }
+          } else {
+            monitor.membersFailed++;
+            console.log(`[Monitor ${sessionId}] ❌ ${member.username || member.userId}: لم يُضف فعلياً (فشل التحقق)`);
           }
         }
         
