@@ -1483,19 +1483,34 @@ async function handleStartMonitoring({ accounts, addAccounts, groups, sessionId,
 
       try {
         let userEntity = null;
-        // Only use username-based resolution for reliable adding
-        if (member.username) { 
-          try { userEntity = await activeClient.client.getEntity(member.username); } catch (_) {} 
-        }
-        if (!userEntity && member.accessHash && member.accessHash !== '0') {
-          try { 
-            userEntity = new Api.InputPeerUser({ 
-              userId: BigInt(member.userId), 
-              accessHash: BigInt(member.accessHash) 
-            }); 
+        let usedAccessHashFallback = false;
+
+        // Prefer per-account username resolution (avoids stale accessHash issues across accounts)
+        if (member.username && member.username.trim()) {
+          try {
+            const cleanUsername = member.username.trim().replace('@', '');
+            const resolved = await activeClient.client.invoke(new Api.contacts.ResolveUsername({ username: cleanUsername }));
+            if (resolved?.users?.length > 0) {
+              userEntity = resolved.users[0];
+            }
           } catch (_) {}
         }
-        if (!userEntity) { monitor.membersFailed++; continue; }
+
+        // Last resort only when username is unavailable or not resolvable
+        if (!userEntity && member.accessHash && member.accessHash !== '0') {
+          try {
+            userEntity = new Api.InputPeerUser({
+              userId: BigInt(member.userId),
+              accessHash: BigInt(member.accessHash)
+            });
+            usedAccessHashFallback = true;
+          } catch (_) {}
+        }
+
+        if (!userEntity) {
+          monitor.membersFailed++;
+          continue;
+        }
 
         const result = await activeClient.client.invoke(new Api.channels.InviteToChannel({ 
           channel: activeClient.entity, 
