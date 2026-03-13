@@ -1565,20 +1565,37 @@ async function handleStartMonitoring({ accounts, addAccounts, groups, sessionId,
       } catch (err) {
         const msg = err.message || '';
         
-        if (msg.includes('USER_ALREADY_PARTICIPANT')) { 
-          existingInTarget.add(member.userId); 
+        if (msg.includes('USER_ALREADY_PARTICIPANT')) {
+          existingInTarget.add(member.userId);
         }
         else if (msg.includes('FLOOD_WAIT')) {
           const ws = parseInt((msg.match(/(\d+)/)||[])[1]) || 60;
           activeClient.floodUntil = Date.now() + (ws + 1) * 1000;
           monitor.addQueue.unshift(member); // Return member to queue
           console.log(`[Monitor ${sessionId}] ⏳ ${activeClient.phone} flood wait ${ws}s, will retry...`);
-          
+
           // If flood wait is too long, trigger 25-hour cooldown
           if (ws > 3600) { // More than 1 hour flood
             activeClient.addCount = MEMBERS_PER_ACCOUNT; // Trigger cooldown
             activeClient.lastResetTime = Date.now();
             console.log(`[Monitor ${sessionId}] 🔄 ${activeClient.phone} long flood (${ws}s), entering ${COOLDOWN_HOURS}h cooldown...`);
+          }
+        }
+        else if (msg.includes('USER_ID_INVALID') || msg.includes('CHAT_MEMBER_ADD_FAILED')) {
+          const retryCount = Number(member.retryCount || 0);
+          if (retryCount < 2) {
+            member.retryCount = retryCount + 1;
+
+            // If access-hash fallback failed, force next retry to use username/source re-resolution only
+            if (usedAccessHashFallback && member.username) {
+              member.accessHash = null;
+            }
+
+            monitor.addQueue.push(member);
+            console.log(`[Monitor ${sessionId}] 🔁 Retry ${member.retryCount}/2 for ${member.username || member.userId} (${msg.substring(0, 40)})`);
+          } else {
+            monitor.membersFailed++;
+            console.log(`[Monitor ${sessionId}] ❌ ${member.username || member.userId}: ${msg.substring(0, 60)}`);
           }
         }
         else if (msg.includes('USER_BANNED_IN_CHANNEL') || msg.includes('CHAT_ADMIN_REQUIRED') || msg.includes('CHAT_WRITE_FORBIDDEN')) {
@@ -1589,16 +1606,16 @@ async function handleStartMonitoring({ accounts, addAccounts, groups, sessionId,
           monitor.addQueue.unshift(member); // Return member to queue
           monitor.errors.push(`${activeClient.phone}: محظور من الإضافة (تبريد ${COOLDOWN_HOURS} ساعة)`);
           console.log(`[Monitor ${sessionId}] 🚫 ${activeClient.phone} banned from adding, entering ${COOLDOWN_HOURS}h cooldown (NOT permanent)`);
-          
+
           // Disconnect client to save resources during cooldown
           try { await activeClient.client.disconnect(); } catch (_) {}
         }
         else if (msg.includes('USER_PRIVACY') || msg.includes('INPUT_USER_DEACTIVATED') || msg.includes('USER_BANNED')) {
           monitor.membersFailed++;
         }
-        else { 
-          monitor.membersFailed++; 
-          console.log(`[Monitor ${sessionId}] ❌ ${activeClient.phone} add error: ${msg.substring(0, 50)}`); 
+        else {
+          monitor.membersFailed++;
+          console.log(`[Monitor ${sessionId}] ❌ ${activeClient.phone} add error: ${msg.substring(0, 50)}`);
         }
       }
     }
