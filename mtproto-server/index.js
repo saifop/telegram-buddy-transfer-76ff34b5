@@ -1223,6 +1223,7 @@ async function handleStartMonitoring({ accounts, addAccounts, groups, sessionId,
               username: memberData.username,
               accessHash: memberData.access_hash,
               sourceGroup: memberData.source_group,
+              retryCount: 0,
             });
           }
           if (monitor.membersFound % 10 === 0) {
