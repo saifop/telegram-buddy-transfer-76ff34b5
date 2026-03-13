@@ -2385,10 +2385,19 @@ async function runBatchAddJob(job) {
               if (em.includes('FLOOD_WAIT')) { const ws = parseInt((em.match(/(\d+)/)||['60'])[0]); if (att < 3) { addJobLog(job, 'warning', `FLOOD ${ws}s`, account.phone); await sleep((ws+1)*1000); continue; } else { job.accountFloodUntil.set(accKey, Date.now()+ws*1000); clientPool.delete(accKey); retries++; break; } }
               if (em.includes('PEER_FLOOD')) { if (att < 3) { await sleep(30000*(att+1)); continue; } job.accountFloodUntil.set(accKey, Date.now()+60000); clientPool.delete(accKey); retries++; break; }
               if (em.includes('USER_ALREADY_PARTICIPANT')) { member.status='skipped'; member.error='موجود مسبقاً'; job.skippedCount++; addJobLog(job,'info',`⏭️ ${memberLabel} موجود`); memberDone=true; break; }
-              if (em.includes('CHAT_ADMIN_REQUIRED')||em.includes('CHAT_WRITE_FORBIDDEN')) { job.notAdminAccounts.add(accKey); addJobLog(job,'error',`${account.phone} ليس مشرفاً`); clientPool.delete(accKey); retries++; break; }
-              if (em.includes('USER_PRIVACY')||em.includes('USER_NOT_MUTUAL')||em.includes('DEACTIVATED')||em.includes('USER_CHANNELS_TOO')||em.includes('USER_BANNED')||em.includes('USER_KICKED')||em.includes('USER_ID_INVALID')) {
-                member.status='skipped'; member.error=em.substring(0,40); job.skippedCount++; addJobLog(job,'info',`⏭️ ${memberLabel}: ${em.substring(0,40)}`); memberDone=true; break;
-              }
+               if (em.includes('CHAT_ADMIN_REQUIRED')||em.includes('CHAT_WRITE_FORBIDDEN')) { job.notAdminAccounts.add(accKey); addJobLog(job,'error',`${account.phone} ليس مشرفاً`); clientPool.delete(accKey); retries++; break; }
+               if (em.includes('USER_ID_INVALID') || em.includes('CHAT_MEMBER_ADD_FAILED')) {
+                 if (em.includes('USER_ID_INVALID') && member.username) {
+                   member.accessHash = '';
+                 }
+                 addJobLog(job,'warning',`🔁 إعادة محاولة ${memberLabel}: ${em.substring(0,35)}`,account.phone);
+                 clientPool.delete(accKey);
+                 retries++;
+                 break;
+               }
+               if (em.includes('USER_PRIVACY')||em.includes('USER_NOT_MUTUAL')||em.includes('DEACTIVATED')||em.includes('USER_CHANNELS_TOO')||em.includes('USER_BANNED')||em.includes('USER_KICKED')) {
+                 member.status='skipped'; member.error=em.substring(0,40); job.skippedCount++; addJobLog(job,'info',`⏭️ ${memberLabel}: ${em.substring(0,40)}`); memberDone=true; break;
+               }
               // Connection error - invalidate pool entry and retry
               if (em.includes('disconnect') || em.includes('connection') || em.includes('TIMEOUT')) {
                 clientPool.delete(accKey); retries++; break;
