@@ -1223,6 +1223,7 @@ async function handleStartMonitoring({ accounts, addAccounts, groups, sessionId,
               username: memberData.username,
               accessHash: memberData.access_hash,
               sourceGroup: memberData.source_group,
+              retryCount: 0,
             });
           }
           if (monitor.membersFound % 10 === 0) {
@@ -1482,19 +1483,34 @@ async function handleStartMonitoring({ accounts, addAccounts, groups, sessionId,
 
       try {
         let userEntity = null;
-        // Only use username-based resolution for reliable adding
-        if (member.username) { 
-          try { userEntity = await activeClient.client.getEntity(member.username); } catch (_) {} 
-        }
-        if (!userEntity && member.accessHash && member.accessHash !== '0') {
-          try { 
-            userEntity = new Api.InputPeerUser({ 
-              userId: BigInt(member.userId), 
-              accessHash: BigInt(member.accessHash) 
-            }); 
+        let usedAccessHashFallback = false;
+
+        // Prefer per-account username resolution (avoids stale accessHash issues across accounts)
+        if (member.username && member.username.trim()) {
+          try {
+            const cleanUsername = member.username.trim().replace('@', '');
+            const resolved = await activeClient.client.invoke(new Api.contacts.ResolveUsername({ username: cleanUsername }));
+            if (resolved?.users?.length > 0) {
+              userEntity = resolved.users[0];
+            }
           } catch (_) {}
         }
-        if (!userEntity) { monitor.membersFailed++; continue; }
+
+        // Last resort only when username is unavailable or not resolvable
+        if (!userEntity && member.accessHash && member.accessHash !== '0') {
+          try {
+            userEntity = new Api.InputPeerUser({
+              userId: BigInt(member.userId),
+              accessHash: BigInt(member.accessHash)
+            });
+            usedAccessHashFallback = true;
+          } catch (_) {}
+        }
+
+        if (!userEntity) {
+          monitor.membersFailed++;
+          continue;
+        }
 
         const result = await activeClient.client.invoke(new Api.channels.InviteToChannel({ 
           channel: activeClient.entity, 
@@ -1517,10 +1533,16 @@ async function handleStartMonitoring({ accounts, addAccounts, groups, sessionId,
               verified = true;
             }
           } catch (vErr) {
-            // ANY verification error = not added (including timeouts, peer errors, etc.)
             const vm = vErr.message || '';
-            console.log(`[Monitor ${sessionId}] ⚠️ Verification failed for ${member.username || member.userId}: ${vm.substring(0, 60)}`);
-            verified = false;
+            if (vm.includes('CHAT_ADMIN_REQUIRED') || vm.includes('CHAT_WRITE_FORBIDDEN')) {
+              // Some accounts can invite but cannot query participants; trust successful invite response
+              console.log(`[Monitor ${sessionId}] ⚠️ Verification permission missing for ${member.username || member.userId}, trusting invite result`);
+              verified = true;
+            } else {
+              // Any other verification error = not added
+              console.log(`[Monitor ${sessionId}] ⚠️ Verification failed for ${member.username || member.userId}: ${vm.substring(0, 60)}`);
+              verified = false;
+            }
           }
           
           if (verified) {
@@ -1549,20 +1571,37 @@ async function handleStartMonitoring({ accounts, addAccounts, groups, sessionId,
       } catch (err) {
         const msg = err.message || '';
         
-        if (msg.includes('USER_ALREADY_PARTICIPANT')) { 
-          existingInTarget.add(member.userId); 
+        if (msg.includes('USER_ALREADY_PARTICIPANT')) {
+          existingInTarget.add(member.userId);
         }
         else if (msg.includes('FLOOD_WAIT')) {
           const ws = parseInt((msg.match(/(\d+)/)||[])[1]) || 60;
           activeClient.floodUntil = Date.now() + (ws + 1) * 1000;
           monitor.addQueue.unshift(member); // Return member to queue
           console.log(`[Monitor ${sessionId}] ⏳ ${activeClient.phone} flood wait ${ws}s, will retry...`);
-          
+
           // If flood wait is too long, trigger 25-hour cooldown
           if (ws > 3600) { // More than 1 hour flood
             activeClient.addCount = MEMBERS_PER_ACCOUNT; // Trigger cooldown
             activeClient.lastResetTime = Date.now();
             console.log(`[Monitor ${sessionId}] 🔄 ${activeClient.phone} long flood (${ws}s), entering ${COOLDOWN_HOURS}h cooldown...`);
+          }
+        }
+        else if (msg.includes('USER_ID_INVALID') || msg.includes('CHAT_MEMBER_ADD_FAILED')) {
+          const retryCount = Number(member.retryCount || 0);
+          if (retryCount < 2) {
+            member.retryCount = retryCount + 1;
+
+            // If access-hash fallback failed, force next retry to use username/source re-resolution only
+            if (usedAccessHashFallback && member.username) {
+              member.accessHash = null;
+            }
+
+            monitor.addQueue.push(member);
+            console.log(`[Monitor ${sessionId}] 🔁 Retry ${member.retryCount}/2 for ${member.username || member.userId} (${msg.substring(0, 40)})`);
+          } else {
+            monitor.membersFailed++;
+            console.log(`[Monitor ${sessionId}] ❌ ${member.username || member.userId}: ${msg.substring(0, 60)}`);
           }
         }
         else if (msg.includes('USER_BANNED_IN_CHANNEL') || msg.includes('CHAT_ADMIN_REQUIRED') || msg.includes('CHAT_WRITE_FORBIDDEN')) {
@@ -1573,16 +1612,16 @@ async function handleStartMonitoring({ accounts, addAccounts, groups, sessionId,
           monitor.addQueue.unshift(member); // Return member to queue
           monitor.errors.push(`${activeClient.phone}: محظور من الإضافة (تبريد ${COOLDOWN_HOURS} ساعة)`);
           console.log(`[Monitor ${sessionId}] 🚫 ${activeClient.phone} banned from adding, entering ${COOLDOWN_HOURS}h cooldown (NOT permanent)`);
-          
+
           // Disconnect client to save resources during cooldown
           try { await activeClient.client.disconnect(); } catch (_) {}
         }
         else if (msg.includes('USER_PRIVACY') || msg.includes('INPUT_USER_DEACTIVATED') || msg.includes('USER_BANNED')) {
           monitor.membersFailed++;
         }
-        else { 
-          monitor.membersFailed++; 
-          console.log(`[Monitor ${sessionId}] ❌ ${activeClient.phone} add error: ${msg.substring(0, 50)}`); 
+        else {
+          monitor.membersFailed++;
+          console.log(`[Monitor ${sessionId}] ❌ ${activeClient.phone} add error: ${msg.substring(0, 50)}`);
         }
       }
     }
@@ -2352,10 +2391,19 @@ async function runBatchAddJob(job) {
               if (em.includes('FLOOD_WAIT')) { const ws = parseInt((em.match(/(\d+)/)||['60'])[0]); if (att < 3) { addJobLog(job, 'warning', `FLOOD ${ws}s`, account.phone); await sleep((ws+1)*1000); continue; } else { job.accountFloodUntil.set(accKey, Date.now()+ws*1000); clientPool.delete(accKey); retries++; break; } }
               if (em.includes('PEER_FLOOD')) { if (att < 3) { await sleep(30000*(att+1)); continue; } job.accountFloodUntil.set(accKey, Date.now()+60000); clientPool.delete(accKey); retries++; break; }
               if (em.includes('USER_ALREADY_PARTICIPANT')) { member.status='skipped'; member.error='موجود مسبقاً'; job.skippedCount++; addJobLog(job,'info',`⏭️ ${memberLabel} موجود`); memberDone=true; break; }
-              if (em.includes('CHAT_ADMIN_REQUIRED')||em.includes('CHAT_WRITE_FORBIDDEN')) { job.notAdminAccounts.add(accKey); addJobLog(job,'error',`${account.phone} ليس مشرفاً`); clientPool.delete(accKey); retries++; break; }
-              if (em.includes('USER_PRIVACY')||em.includes('USER_NOT_MUTUAL')||em.includes('DEACTIVATED')||em.includes('USER_CHANNELS_TOO')||em.includes('USER_BANNED')||em.includes('USER_KICKED')||em.includes('USER_ID_INVALID')) {
-                member.status='skipped'; member.error=em.substring(0,40); job.skippedCount++; addJobLog(job,'info',`⏭️ ${memberLabel}: ${em.substring(0,40)}`); memberDone=true; break;
-              }
+               if (em.includes('CHAT_ADMIN_REQUIRED')||em.includes('CHAT_WRITE_FORBIDDEN')) { job.notAdminAccounts.add(accKey); addJobLog(job,'error',`${account.phone} ليس مشرفاً`); clientPool.delete(accKey); retries++; break; }
+               if (em.includes('USER_ID_INVALID') || em.includes('CHAT_MEMBER_ADD_FAILED')) {
+                 if (em.includes('USER_ID_INVALID') && member.username) {
+                   member.accessHash = '';
+                 }
+                 addJobLog(job,'warning',`🔁 إعادة محاولة ${memberLabel}: ${em.substring(0,35)}`,account.phone);
+                 clientPool.delete(accKey);
+                 retries++;
+                 break;
+               }
+               if (em.includes('USER_PRIVACY')||em.includes('USER_NOT_MUTUAL')||em.includes('DEACTIVATED')||em.includes('USER_CHANNELS_TOO')||em.includes('USER_BANNED')||em.includes('USER_KICKED')) {
+                 member.status='skipped'; member.error=em.substring(0,40); job.skippedCount++; addJobLog(job,'info',`⏭️ ${memberLabel}: ${em.substring(0,40)}`); memberDone=true; break;
+               }
               // Connection error - invalidate pool entry and retry
               if (em.includes('disconnect') || em.includes('connection') || em.includes('TIMEOUT')) {
                 clientPool.delete(accKey); retries++; break;
