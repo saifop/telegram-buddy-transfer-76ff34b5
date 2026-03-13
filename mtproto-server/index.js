@@ -1533,10 +1533,16 @@ async function handleStartMonitoring({ accounts, addAccounts, groups, sessionId,
               verified = true;
             }
           } catch (vErr) {
-            // ANY verification error = not added (including timeouts, peer errors, etc.)
             const vm = vErr.message || '';
-            console.log(`[Monitor ${sessionId}] ⚠️ Verification failed for ${member.username || member.userId}: ${vm.substring(0, 60)}`);
-            verified = false;
+            if (vm.includes('CHAT_ADMIN_REQUIRED') || vm.includes('CHAT_WRITE_FORBIDDEN')) {
+              // Some accounts can invite but cannot query participants; trust successful invite response
+              console.log(`[Monitor ${sessionId}] ⚠️ Verification permission missing for ${member.username || member.userId}, trusting invite result`);
+              verified = true;
+            } else {
+              // Any other verification error = not added
+              console.log(`[Monitor ${sessionId}] ⚠️ Verification failed for ${member.username || member.userId}: ${vm.substring(0, 60)}`);
+              verified = false;
+            }
           }
           
           if (verified) {
