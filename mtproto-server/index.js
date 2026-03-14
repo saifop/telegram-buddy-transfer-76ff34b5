@@ -1604,17 +1604,20 @@ async function handleStartMonitoring({ accounts, addAccounts, groups, sessionId,
             console.log(`[Monitor ${sessionId}] ❌ ${member.username || member.userId}: ${msg.substring(0, 60)}`);
           }
         }
-        else if (msg.includes('USER_BANNED_IN_CHANNEL') || msg.includes('CHAT_ADMIN_REQUIRED') || msg.includes('CHAT_WRITE_FORBIDDEN')) {
-          // Instead of permanent ban, enter 25-hour cooldown to protect the account
-          activeClient.addCount = MEMBERS_PER_ACCOUNT; // Trigger cooldown
+        else if (msg.includes('USER_BANNED_IN_CHANNEL')) {
+          // Only ban for USER_BANNED_IN_CHANNEL, not for CHAT_ADMIN_REQUIRED
+          activeClient.addCount = MEMBERS_PER_ACCOUNT;
           activeClient.lastResetTime = Date.now();
-          activeClient.floodUntil = Date.now() + COOLDOWN_MS; // Block for full cooldown
-          monitor.addQueue.unshift(member); // Return member to queue
+          activeClient.floodUntil = Date.now() + COOLDOWN_MS;
+          monitor.addQueue.unshift(member);
           monitor.errors.push(`${activeClient.phone}: محظور من الإضافة (تبريد ${COOLDOWN_HOURS} ساعة)`);
-          console.log(`[Monitor ${sessionId}] 🚫 ${activeClient.phone} banned from adding, entering ${COOLDOWN_HOURS}h cooldown (NOT permanent)`);
-
-          // Disconnect client to save resources during cooldown
+          console.log(`[Monitor ${sessionId}] 🚫 ${activeClient.phone} banned from adding, entering ${COOLDOWN_HOURS}h cooldown`);
           try { await activeClient.client.disconnect(); } catch (_) {}
+        }
+        else if (msg.includes('CHAT_ADMIN_REQUIRED') || msg.includes('CHAT_WRITE_FORBIDDEN')) {
+          // Don't block — just retry with next account
+          monitor.addQueue.unshift(member);
+          console.log(`[Monitor ${sessionId}] ⚠️ ${activeClient.phone}: ${msg.substring(0, 40)}, trying next account`);
         }
         else if (msg.includes('USER_PRIVACY') || msg.includes('INPUT_USER_DEACTIVATED') || msg.includes('USER_BANNED')) {
           monitor.membersFailed++;
