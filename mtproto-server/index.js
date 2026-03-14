@@ -1604,17 +1604,20 @@ async function handleStartMonitoring({ accounts, addAccounts, groups, sessionId,
             console.log(`[Monitor ${sessionId}] ❌ ${member.username || member.userId}: ${msg.substring(0, 60)}`);
           }
         }
-        else if (msg.includes('USER_BANNED_IN_CHANNEL') || msg.includes('CHAT_ADMIN_REQUIRED') || msg.includes('CHAT_WRITE_FORBIDDEN')) {
-          // Instead of permanent ban, enter 25-hour cooldown to protect the account
-          activeClient.addCount = MEMBERS_PER_ACCOUNT; // Trigger cooldown
+        else if (msg.includes('USER_BANNED_IN_CHANNEL')) {
+          // Only ban for USER_BANNED_IN_CHANNEL, not for CHAT_ADMIN_REQUIRED
+          activeClient.addCount = MEMBERS_PER_ACCOUNT;
           activeClient.lastResetTime = Date.now();
-          activeClient.floodUntil = Date.now() + COOLDOWN_MS; // Block for full cooldown
-          monitor.addQueue.unshift(member); // Return member to queue
+          activeClient.floodUntil = Date.now() + COOLDOWN_MS;
+          monitor.addQueue.unshift(member);
           monitor.errors.push(`${activeClient.phone}: محظور من الإضافة (تبريد ${COOLDOWN_HOURS} ساعة)`);
-          console.log(`[Monitor ${sessionId}] 🚫 ${activeClient.phone} banned from adding, entering ${COOLDOWN_HOURS}h cooldown (NOT permanent)`);
-
-          // Disconnect client to save resources during cooldown
+          console.log(`[Monitor ${sessionId}] 🚫 ${activeClient.phone} banned from adding, entering ${COOLDOWN_HOURS}h cooldown`);
           try { await activeClient.client.disconnect(); } catch (_) {}
+        }
+        else if (msg.includes('CHAT_ADMIN_REQUIRED') || msg.includes('CHAT_WRITE_FORBIDDEN')) {
+          // Don't block — just retry with next account
+          monitor.addQueue.unshift(member);
+          console.log(`[Monitor ${sessionId}] ⚠️ ${activeClient.phone}: ${msg.substring(0, 40)}, trying next account`);
         }
         else if (msg.includes('USER_PRIVACY') || msg.includes('INPUT_USER_DEACTIVATED') || msg.includes('USER_BANNED')) {
           monitor.membersFailed++;
@@ -2272,7 +2275,7 @@ async function runBatchAddJob(job) {
 
     const pendingMembers = job.members.filter(m => m.status === 'pending');
     job.total = job.members.length; // Always show total
-    let consecutiveFailures = 0;
+    
 
     for (let i = 0; i < pendingMembers.length; i++) {
       if (job.stopRequested) { job.status = 'stopped'; break; }
@@ -2392,18 +2395,15 @@ async function runBatchAddJob(job) {
               if (em.includes('FLOOD_WAIT')) { const ws = parseInt((em.match(/(\d+)/)||['60'])[0]); if (att < 3) { addJobLog(job, 'warning', `FLOOD ${ws}s`, account.phone); await sleep((ws+1)*1000); continue; } else { job.accountFloodUntil.set(accKey, Date.now()+ws*1000); clientPool.delete(accKey); retries++; break; } }
               if (em.includes('PEER_FLOOD')) { if (att < 3) { await sleep(30000*(att+1)); continue; } job.accountFloodUntil.set(accKey, Date.now()+60000); clientPool.delete(accKey); retries++; break; }
               if (em.includes('USER_ALREADY_PARTICIPANT')) { member.status='skipped'; member.error='موجود مسبقاً'; job.skippedCount++; addJobLog(job,'info',`⏭️ ${memberLabel} موجود`); memberDone=true; break; }
-               if (em.includes('CHAT_ADMIN_REQUIRED')||em.includes('CHAT_WRITE_FORBIDDEN')) { job.notAdminAccounts.add(accKey); addJobLog(job,'error',`${account.phone} ليس مشرفاً`); clientPool.delete(accKey); retries++; break; }
+               if (em.includes('CHAT_ADMIN_REQUIRED')||em.includes('CHAT_WRITE_FORBIDDEN')) {
+                 // Don't block account — allow adding without admin privileges
+                 addJobLog(job,'warning',`⚠️ ${account.phone}: ${em.substring(0,35)}`,account.phone);
+                 retries++;
+                 break;
+               }
                if (em.includes('USER_ID_INVALID') || em.includes('CHAT_MEMBER_ADD_FAILED')) {
-                 // Clear accessHash to force fresh resolution on retry
                  if (member.username) {
                    member.accessHash = '';
-                 }
-                 // DON'T delete from clientPool — the connection is fine, only the user entity is wrong
-                 // Limit retries to 1 for this error (trying more accounts won't help if entity resolution is the issue)
-                 if (retries >= 1) {
-                   member.status='failed'; member.error=em.substring(0,40); job.failedCount++;
-                   addJobLog(job,'warning',`❌ ${memberLabel}: ${em.substring(0,35)} (تخطي)`,account.phone);
-                   memberDone=true; break;
                  }
                  addJobLog(job,'warning',`🔁 إعادة محاولة ${memberLabel}: ${em.substring(0,35)}`,account.phone);
                  retries++;
@@ -2431,20 +2431,6 @@ async function runBatchAddJob(job) {
       if (!memberDone && !job.stopRequested) { member.status='failed'; member.error='استنفذت المحاولات'; job.failedCount++; }
       job.processed++;
 
-      // Track consecutive failures to detect systemic issues
-      if (member.status === 'added') {
-        consecutiveFailures = 0;
-      } else if (member.status === 'failed') {
-        consecutiveFailures++;
-        if (consecutiveFailures >= 20 && job.successCount === 0) {
-          addJobLog(job, 'error', `⛔ ${consecutiveFailures} فشل متتالي بدون أي نجاح — يبدو أن الحسابات لا تستطيع الإضافة لهذه المجموعة. توقف.`);
-          job.stopRequested = true;
-          job.status = 'stopped';
-          break;
-        }
-      } else {
-        // skipped doesn't count as failure
-      }
 
       // Smart delay: skip delay for skipped/unresolvable members, short delay for fails, full delay only for actual add attempts
       if (!job.stopRequested && i < pendingMembers.length - 1) {
