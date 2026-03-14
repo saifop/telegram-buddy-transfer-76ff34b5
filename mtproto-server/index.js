@@ -1481,9 +1481,9 @@ async function handleStartMonitoring({ accounts, addAccounts, groups, sessionId,
       const member = monitor.addQueue.shift();
       if (!member || existingInTarget.has(member.userId)) continue;
 
+      let usedAccessHashFallback = false;
       try {
         let userEntity = null;
-        let usedAccessHashFallback = false;
 
         // Prefer per-account username resolution (avoids stale accessHash issues across accounts)
         if (member.username && member.username.trim()) {
