@@ -2431,6 +2431,21 @@ async function runBatchAddJob(job) {
       if (!memberDone && !job.stopRequested) { member.status='failed'; member.error='استنفذت المحاولات'; job.failedCount++; }
       job.processed++;
 
+      // Track consecutive failures to detect systemic issues
+      if (member.status === 'added') {
+        consecutiveFailures = 0;
+      } else if (member.status === 'failed') {
+        consecutiveFailures++;
+        if (consecutiveFailures >= 20 && job.successCount === 0) {
+          addJobLog(job, 'error', `⛔ ${consecutiveFailures} فشل متتالي بدون أي نجاح — يبدو أن الحسابات لا تستطيع الإضافة لهذه المجموعة. توقف.`);
+          job.stopRequested = true;
+          job.status = 'stopped';
+          break;
+        }
+      } else {
+        // skipped doesn't count as failure
+      }
+
       // Smart delay: skip delay for skipped/unresolvable members, short delay for fails, full delay only for actual add attempts
       if (!job.stopRequested && i < pendingMembers.length - 1) {
         let delay;
