@@ -2392,18 +2392,15 @@ async function runBatchAddJob(job) {
               if (em.includes('FLOOD_WAIT')) { const ws = parseInt((em.match(/(\d+)/)||['60'])[0]); if (att < 3) { addJobLog(job, 'warning', `FLOOD ${ws}s`, account.phone); await sleep((ws+1)*1000); continue; } else { job.accountFloodUntil.set(accKey, Date.now()+ws*1000); clientPool.delete(accKey); retries++; break; } }
               if (em.includes('PEER_FLOOD')) { if (att < 3) { await sleep(30000*(att+1)); continue; } job.accountFloodUntil.set(accKey, Date.now()+60000); clientPool.delete(accKey); retries++; break; }
               if (em.includes('USER_ALREADY_PARTICIPANT')) { member.status='skipped'; member.error='موجود مسبقاً'; job.skippedCount++; addJobLog(job,'info',`⏭️ ${memberLabel} موجود`); memberDone=true; break; }
-               if (em.includes('CHAT_ADMIN_REQUIRED')||em.includes('CHAT_WRITE_FORBIDDEN')) { job.notAdminAccounts.add(accKey); addJobLog(job,'error',`${account.phone} ليس مشرفاً`); clientPool.delete(accKey); retries++; break; }
+               if (em.includes('CHAT_ADMIN_REQUIRED')||em.includes('CHAT_WRITE_FORBIDDEN')) {
+                 // Don't block account — allow adding without admin privileges
+                 addJobLog(job,'warning',`⚠️ ${account.phone}: ${em.substring(0,35)}`,account.phone);
+                 retries++;
+                 break;
+               }
                if (em.includes('USER_ID_INVALID') || em.includes('CHAT_MEMBER_ADD_FAILED')) {
-                 // Clear accessHash to force fresh resolution on retry
                  if (member.username) {
                    member.accessHash = '';
-                 }
-                 // DON'T delete from clientPool — the connection is fine, only the user entity is wrong
-                 // Limit retries to 1 for this error (trying more accounts won't help if entity resolution is the issue)
-                 if (retries >= 1) {
-                   member.status='failed'; member.error=em.substring(0,40); job.failedCount++;
-                   addJobLog(job,'warning',`❌ ${memberLabel}: ${em.substring(0,35)} (تخطي)`,account.phone);
-                   memberDone=true; break;
                  }
                  addJobLog(job,'warning',`🔁 إعادة محاولة ${memberLabel}: ${em.substring(0,35)}`,account.phone);
                  retries++;
