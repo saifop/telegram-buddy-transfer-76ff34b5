@@ -2393,11 +2393,18 @@ async function runBatchAddJob(job) {
               if (em.includes('USER_ALREADY_PARTICIPANT')) { member.status='skipped'; member.error='موجود مسبقاً'; job.skippedCount++; addJobLog(job,'info',`⏭️ ${memberLabel} موجود`); memberDone=true; break; }
                if (em.includes('CHAT_ADMIN_REQUIRED')||em.includes('CHAT_WRITE_FORBIDDEN')) { job.notAdminAccounts.add(accKey); addJobLog(job,'error',`${account.phone} ليس مشرفاً`); clientPool.delete(accKey); retries++; break; }
                if (em.includes('USER_ID_INVALID') || em.includes('CHAT_MEMBER_ADD_FAILED')) {
-                 if (em.includes('USER_ID_INVALID') && member.username) {
+                 // Clear accessHash to force fresh resolution on retry
+                 if (member.username) {
                    member.accessHash = '';
                  }
+                 // DON'T delete from clientPool — the connection is fine, only the user entity is wrong
+                 // Limit retries to 1 for this error (trying more accounts won't help if entity resolution is the issue)
+                 if (retries >= 1) {
+                   member.status='failed'; member.error=em.substring(0,40); job.failedCount++;
+                   addJobLog(job,'warning',`❌ ${memberLabel}: ${em.substring(0,35)} (تخطي)`,account.phone);
+                   memberDone=true; break;
+                 }
                  addJobLog(job,'warning',`🔁 إعادة محاولة ${memberLabel}: ${em.substring(0,35)}`,account.phone);
-                 clientPool.delete(accKey);
                  retries++;
                  break;
                }
