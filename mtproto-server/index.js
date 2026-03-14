@@ -2275,7 +2275,7 @@ async function runBatchAddJob(job) {
 
     const pendingMembers = job.members.filter(m => m.status === 'pending');
     job.total = job.members.length; // Always show total
-    let consecutiveFailures = 0;
+    
 
     for (let i = 0; i < pendingMembers.length; i++) {
       if (job.stopRequested) { job.status = 'stopped'; break; }
