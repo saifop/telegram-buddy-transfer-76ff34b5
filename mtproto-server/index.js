@@ -1617,11 +1617,15 @@ async function handleStartMonitoring({ accounts, addAccounts, groups, sessionId,
           monitor.addQueue.unshift(member);
           console.log(`[Monitor ${sessionId}] ⚠️ ${activeClient.phone}: ${msg.substring(0, 40)}, trying next account`);
         }
-        else if (msg.includes('USER_PRIVACY') || msg.includes('INPUT_USER_DEACTIVATED') || msg.includes('USER_BANNED')) {
+        else if (msg.includes('USER_PRIVACY') || msg.includes('INPUT_USER_DEACTIVATED') || msg.includes('USER_BANNED') || msg.includes('USER_NOT_MUTUAL')) {
           monitor.membersFailed++;
+          // Silent skip — these are normal
         }
         else {
           monitor.membersFailed++;
+          if (!monitor.addErrors) monitor.addErrors = [];
+          monitor.addErrors.push(`❌ ${activeClient.phone}: ${msg.substring(0, 50)}`);
+          if (monitor.addErrors.length > 50) monitor.addErrors.shift();
           console.log(`[Monitor ${sessionId}] ❌ ${activeClient.phone} add error: ${msg.substring(0, 50)}`);
         }
       }
