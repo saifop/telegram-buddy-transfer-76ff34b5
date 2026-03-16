@@ -2059,8 +2059,8 @@ async function handleStartBatchAdd({ accounts, members, targetGroup, sourceGroup
     targetGroup,
     sourceGroup: sourceGroup || '',
     settings: {
-      delayMin: settings?.delayMin || 10,
-      delayMax: settings?.delayMax || 30,
+      delayMin: settings?.delayMin ?? 0,
+      delayMax: settings?.delayMax ?? 0,
       maxRetries: settings?.maxRetries || 2,
       cooldownAfterFlood: settings?.cooldownAfterFlood || 300,
       retryCycles: settings?.retryCycles || 0,

@@ -456,7 +456,7 @@ export function OperationsPanel({
             type="number"
             value={delaySeconds}
             onChange={(e) => setDelaySeconds(Number(e.target.value))}
-            min={5}
+            min={0}
             max={120}
             disabled={isExecuting}
           />
