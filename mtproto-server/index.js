@@ -1566,7 +1566,7 @@ async function handleStartMonitoring({ accounts, addAccounts, groups, sessionId,
         }
         
         // Standard delay between additions
-        await new Promise(r => setTimeout(r, 5000));
+        // No delay between additions (configurable via settings)
         
       } catch (err) {
         const msg = err.message || '';
