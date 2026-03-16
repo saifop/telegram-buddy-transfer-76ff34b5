@@ -2418,15 +2418,18 @@ async function runBatchAddJob(job) {
               if (em.includes('PEER_FLOOD')) { if (att < 3) { await sleep(30000*(att+1)); continue; } job.accountFloodUntil.set(accKey, Date.now()+60000); clientPool.delete(accKey); retries++; break; }
               if (em.includes('USER_ALREADY_PARTICIPANT')) { member.status='skipped'; member.error='موجود مسبقاً'; job.skippedCount++; addJobLog(job,'info',`⏭️ ${memberLabel} موجود`); memberDone=true; break; }
                if (em.includes('CHAT_ADMIN_REQUIRED')||em.includes('CHAT_WRITE_FORBIDDEN')) {
-                 // Don't block account — allow adding without admin privileges
                  addJobLog(job,'warning',`⚠️ ${account.phone}: ${em.substring(0,35)}`,account.phone);
                  retries++;
                  break;
                }
                if (em.includes('USER_ID_INVALID') || em.includes('CHAT_MEMBER_ADD_FAILED')) {
-                 if (member.username) {
-                   member.accessHash = '';
+                 // Cap retries at 3 accounts max to avoid cycling through all 35
+                 if (retries >= 3) {
+                   member.status='skipped'; member.error='فشل الإضافة (3 محاولات)'; job.skippedCount++;
+                   addJobLog(job,'info',`⏭️ ${memberLabel}: فشل بعد 3 حسابات`,account.phone);
+                   memberDone=true; break;
                  }
+                 if (member.username) { member.accessHash = ''; }
                  addJobLog(job,'warning',`🔁 إعادة محاولة ${memberLabel}: ${em.substring(0,35)}`,account.phone);
                  retries++;
                  break;
