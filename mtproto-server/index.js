@@ -2012,6 +2012,7 @@ async function handleGetMonitoringStatus({ sessionId }, res) {
       autoAddEnabled: !!monitor.targetGroup,
       uptime: Math.floor((Date.now() - monitor.startedAt) / 1000),
       errors: monitor.errors,
+      addErrors: monitor.addErrors || [],
       addAccountsStatus,
     });
   }
