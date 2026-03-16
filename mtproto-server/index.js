@@ -1591,16 +1591,14 @@ async function handleStartMonitoring({ accounts, addAccounts, groups, sessionId,
           const retryCount = Number(member.retryCount || 0);
           if (retryCount < 2) {
             member.retryCount = retryCount + 1;
-
-            // If access-hash fallback failed, force next retry to use username/source re-resolution only
-            if (usedAccessHashFallback && member.username) {
-              member.accessHash = null;
-            }
-
+            if (usedAccessHashFallback && member.username) { member.accessHash = null; }
             monitor.addQueue.push(member);
-            console.log(`[Monitor ${sessionId}] 🔁 Retry ${member.retryCount}/2 for ${member.username || member.userId} (${msg.substring(0, 40)})`);
+            console.log(`[Monitor ${sessionId}] 🔁 Retry ${member.retryCount}/2 for ${member.username || member.userId}`);
           } else {
             monitor.membersFailed++;
+            if (!monitor.addErrors) monitor.addErrors = [];
+            monitor.addErrors.push(`❌ ${member.username || member.userId}: ${msg.substring(0, 40)}`);
+            if (monitor.addErrors.length > 50) monitor.addErrors.shift();
             console.log(`[Monitor ${sessionId}] ❌ ${member.username || member.userId}: ${msg.substring(0, 60)}`);
           }
         }
