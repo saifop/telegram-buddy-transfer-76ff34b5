@@ -86,6 +86,7 @@ export function MonitoringPanel({ accounts }: MonitoringPanelProps) {
     uptime?: number;
     connectedAccounts?: number;
     errors?: string[];
+    addErrors?: string[];
     groups?: string | string[];
     addAccountsStatus?: Array<{
       phone: string;
