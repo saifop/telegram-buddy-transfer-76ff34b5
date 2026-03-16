@@ -1591,16 +1591,14 @@ async function handleStartMonitoring({ accounts, addAccounts, groups, sessionId,
           const retryCount = Number(member.retryCount || 0);
           if (retryCount < 2) {
             member.retryCount = retryCount + 1;
-
-            // If access-hash fallback failed, force next retry to use username/source re-resolution only
-            if (usedAccessHashFallback && member.username) {
-              member.accessHash = null;
-            }
-
+            if (usedAccessHashFallback && member.username) { member.accessHash = null; }
             monitor.addQueue.push(member);
-            console.log(`[Monitor ${sessionId}] 🔁 Retry ${member.retryCount}/2 for ${member.username || member.userId} (${msg.substring(0, 40)})`);
+            console.log(`[Monitor ${sessionId}] 🔁 Retry ${member.retryCount}/2 for ${member.username || member.userId}`);
           } else {
             monitor.membersFailed++;
+            if (!monitor.addErrors) monitor.addErrors = [];
+            monitor.addErrors.push(`❌ ${member.username || member.userId}: ${msg.substring(0, 40)}`);
+            if (monitor.addErrors.length > 50) monitor.addErrors.shift();
             console.log(`[Monitor ${sessionId}] ❌ ${member.username || member.userId}: ${msg.substring(0, 60)}`);
           }
         }
@@ -1619,11 +1617,15 @@ async function handleStartMonitoring({ accounts, addAccounts, groups, sessionId,
           monitor.addQueue.unshift(member);
           console.log(`[Monitor ${sessionId}] ⚠️ ${activeClient.phone}: ${msg.substring(0, 40)}, trying next account`);
         }
-        else if (msg.includes('USER_PRIVACY') || msg.includes('INPUT_USER_DEACTIVATED') || msg.includes('USER_BANNED')) {
+        else if (msg.includes('USER_PRIVACY') || msg.includes('INPUT_USER_DEACTIVATED') || msg.includes('USER_BANNED') || msg.includes('USER_NOT_MUTUAL')) {
           monitor.membersFailed++;
+          // Silent skip — these are normal
         }
         else {
           monitor.membersFailed++;
+          if (!monitor.addErrors) monitor.addErrors = [];
+          monitor.addErrors.push(`❌ ${activeClient.phone}: ${msg.substring(0, 50)}`);
+          if (monitor.addErrors.length > 50) monitor.addErrors.shift();
           console.log(`[Monitor ${sessionId}] ❌ ${activeClient.phone} add error: ${msg.substring(0, 50)}`);
         }
       }
@@ -2014,6 +2016,7 @@ async function handleGetMonitoringStatus({ sessionId }, res) {
       autoAddEnabled: !!monitor.targetGroup,
       uptime: Math.floor((Date.now() - monitor.startedAt) / 1000),
       errors: monitor.errors,
+      addErrors: monitor.addErrors || [],
       addAccountsStatus,
     });
   }
@@ -2418,15 +2421,18 @@ async function runBatchAddJob(job) {
               if (em.includes('PEER_FLOOD')) { if (att < 3) { await sleep(30000*(att+1)); continue; } job.accountFloodUntil.set(accKey, Date.now()+60000); clientPool.delete(accKey); retries++; break; }
               if (em.includes('USER_ALREADY_PARTICIPANT')) { member.status='skipped'; member.error='موجود مسبقاً'; job.skippedCount++; addJobLog(job,'info',`⏭️ ${memberLabel} موجود`); memberDone=true; break; }
                if (em.includes('CHAT_ADMIN_REQUIRED')||em.includes('CHAT_WRITE_FORBIDDEN')) {
-                 // Don't block account — allow adding without admin privileges
                  addJobLog(job,'warning',`⚠️ ${account.phone}: ${em.substring(0,35)}`,account.phone);
                  retries++;
                  break;
                }
                if (em.includes('USER_ID_INVALID') || em.includes('CHAT_MEMBER_ADD_FAILED')) {
-                 if (member.username) {
-                   member.accessHash = '';
+                 // Cap retries at 3 accounts max to avoid cycling through all 35
+                 if (retries >= 3) {
+                   member.status='skipped'; member.error='فشل الإضافة (3 محاولات)'; job.skippedCount++;
+                   addJobLog(job,'info',`⏭️ ${memberLabel}: فشل بعد 3 حسابات`,account.phone);
+                   memberDone=true; break;
                  }
+                 if (member.username) { member.accessHash = ''; }
                  addJobLog(job,'warning',`🔁 إعادة محاولة ${memberLabel}: ${em.substring(0,35)}`,account.phone);
                  retries++;
                  break;
