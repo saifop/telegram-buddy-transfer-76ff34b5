@@ -446,6 +446,18 @@ export function MonitoringPanel({ accounts }: MonitoringPanelProps) {
                     </ScrollArea>
                   </div>
                 )}
+                {liveStatus?.addErrors && liveStatus.addErrors.length > 0 && (
+                  <div className="mt-2 space-y-1">
+                    <p className="text-xs font-medium text-orange-500">🔍 أخطاء الإضافة الأخيرة:</p>
+                    <ScrollArea className="max-h-32">
+                      {liveStatus.addErrors.slice(-10).map((err, i) => (
+                        <p key={i} className="text-[10px] text-orange-400/80 leading-tight">
+                          {err}
+                        </p>
+                      ))}
+                    </ScrollArea>
+                  </div>
+                )}
 
                 {/* Account Status Button */}
                 {liveStatus?.addAccountsStatus && liveStatus.addAccountsStatus.length > 0 && (
