@@ -85,8 +85,8 @@ export function AddMembersPanel({
     targetGroup: "",
     sourceGroup: "",
     membersPerAccount: 20,
-    delayMin: 30,
-    delayMax: 60,
+    delayMin: 0,
+    delayMax: 0,
     pauseAfterBan: true,
     skipExisting: true,
     rotateAccounts: true,
@@ -553,7 +553,7 @@ export function AddMembersPanel({
                 type="number"
                 value={settings.delayMin}
                 onChange={(e) => setSettings({ ...settings, delayMin: Number(e.target.value) })}
-                min={5}
+                min={0}
                 max={300}
               />
             </div>
@@ -563,7 +563,7 @@ export function AddMembersPanel({
                 type="number"
                 value={settings.delayMax}
                 onChange={(e) => setSettings({ ...settings, delayMax: Number(e.target.value) })}
-                min={5}
+                min={0}
                 max={300}
               />
             </div>

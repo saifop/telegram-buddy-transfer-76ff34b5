@@ -1566,7 +1566,7 @@ async function handleStartMonitoring({ accounts, addAccounts, groups, sessionId,
         }
         
         // Standard delay between additions
-        await new Promise(r => setTimeout(r, 5000));
+        // No delay between additions (configurable via settings)
         
       } catch (err) {
         const msg = err.message || '';
@@ -2059,8 +2059,8 @@ async function handleStartBatchAdd({ accounts, members, targetGroup, sourceGroup
     targetGroup,
     sourceGroup: sourceGroup || '',
     settings: {
-      delayMin: settings?.delayMin || 10,
-      delayMax: settings?.delayMax || 30,
+      delayMin: settings?.delayMin ?? 0,
+      delayMax: settings?.delayMax ?? 0,
       maxRetries: settings?.maxRetries || 2,
       cooldownAfterFlood: settings?.cooldownAfterFlood || 300,
       retryCycles: settings?.retryCycles || 0,
@@ -2133,9 +2133,31 @@ async function runBatchAddJob(job) {
       let targetEntity;
       try {
         if (type === 'hash') {
-          try { const cr = await client.invoke(new Api.messages.CheckChatInvite({ hash: value })); if (cr?.chat) targetEntity = cr.chat; } catch(e) {}
-          if (!targetEntity) { try { const jr = await client.invoke(new Api.messages.ImportChatInvite({ hash: value })); if (jr?.chats?.length > 0) targetEntity = jr.chats[0]; } catch(e) {} }
-        } else { targetEntity = await client.getEntity(value); }
+          // Private group: join via invite link first, then resolve
+          try { 
+            const jr = await client.invoke(new Api.messages.ImportChatInvite({ hash: value })); 
+            if (jr?.chats?.length > 0) targetEntity = jr.chats[0]; 
+          } catch(e) {
+            // Already joined or other error - try CheckChatInvite
+            if (e.message?.includes('USER_ALREADY_PARTICIPANT') || e.message?.includes('INVITE_REQUEST_SENT')) {
+              try { const cr = await client.invoke(new Api.messages.CheckChatInvite({ hash: value })); if (cr?.chat) targetEntity = cr.chat; } catch(e2) {}
+            }
+          }
+        } else {
+          // Public group: resolve entity then auto-join silently
+          targetEntity = await client.getEntity(value);
+          if (targetEntity) {
+            try {
+              await client.invoke(new Api.channels.JoinChannel({ channel: targetEntity }));
+              addJobLog(job, 'info', `✅ ${accKey} انضم تلقائياً للمجموعة المستهدفة`, accKey);
+            } catch(joinErr) {
+              const jm = joinErr.message || '';
+              if (!jm.includes('USER_ALREADY_PARTICIPANT') && !jm.includes('CHANNELS_TOO_MUCH')) {
+                addJobLog(job, 'warning', `⚠️ ${accKey} فشل الانضمام التلقائي: ${jm.substring(0,30)}`, accKey);
+              }
+            }
+          }
+        }
       } catch(e) {}
       
       if (!targetEntity) { try { await client.disconnect(); } catch(_){} return null; }
