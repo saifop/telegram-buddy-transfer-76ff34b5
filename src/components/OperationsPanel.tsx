@@ -46,7 +46,7 @@ export function OperationsPanel({
   const [isExecuting, setIsExecuting] = useState(false);
   const [progress, setProgress] = useState({ current: 0, total: 0 });
   const [extractedMembers, setExtractedMembers] = useState<Member[]>([]);
-  const [delaySeconds, setDelaySeconds] = useState(30);
+  const [delaySeconds, setDelaySeconds] = useState(0);
   const [resolvedChatId, setResolvedChatId] = useState<string | null>(null);
 
   const selectedAccountsList = accounts.filter((a) => a.isSelected);
