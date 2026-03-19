@@ -126,11 +126,13 @@ export function useAddMembers({
 
       // Show new logs
       if (data.logs) {
-        const newLogs = data.logs.slice(lastLogIdxRef.current);
+        const newLogs = data.logs.filter((log: any) => log.time > lastLogTimeRef.current);
         for (const log of newLogs) {
           addLog(log.type as LogEntry["type"], log.msg, log.phone);
         }
-        lastLogIdxRef.current = data.logs.length;
+        if (data.logs.length > 0) {
+          lastLogTimeRef.current = Math.max(...data.logs.map((l: any) => l.time || 0));
+        }
       }
     } catch (err) {
       // Network error, keep polling
