@@ -165,7 +165,7 @@ export function useAddMembers({
 
     setIsRunning(true);
     onOperationStart();
-    lastLogIdxRef.current = 0;
+    lastLogTimeRef.current = 0;
     addLog("info", `🚀 بدء عملية إضافة ${selectedMembers.length} عضو في الخلفية...`);
 
     // Prepare data for backend
