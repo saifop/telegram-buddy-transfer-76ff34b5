@@ -56,7 +56,7 @@ export function useAddMembers({
     return localStorage.getItem(BATCH_JOB_KEY);
   });
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const lastLogIdxRef = useRef(0);
+  const lastLogTimeRef = useRef(0);
 
   // Poll for job status
   const pollStatus = useCallback(async (jid: string) => {
