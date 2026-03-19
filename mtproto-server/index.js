@@ -1474,9 +1474,30 @@ async function handleStartMonitoring({ accounts, addAccounts, groups, sessionId,
         const availableAccounts = addClients.filter(c => !c.banned);
         
         if (availableAccounts.length === 0) {
-          console.log(`[Monitor ${sessionId}] ⛔ All ${addClients.length} accounts are permanently banned`);
-          monitor.errors.push('جميع حسابات الإضافة محظورة نهائياً');
-          return;
+          console.log(`[Monitor ${sessionId}] ⛔ All ${addClients.length} accounts banned, waiting for reconnect/cooldown reset...`);
+          monitor.errors.push('جميع الحسابات محظورة - انتظار إعادة المحاولة بعد 30 دقيقة');
+          // Reset all bans after 30 minutes and retry
+          await new Promise(r => setTimeout(r, 30 * 60 * 1000));
+          if (monitor.stopRequested) return;
+          for (const c of addClients) {
+            c.banned = false;
+            c.floodUntil = 0;
+            c.addCount = 0;
+            c.lastResetTime = Date.now();
+            // Reconnect
+            try {
+              if (c.client.disconnected) {
+                const newClient = await getClientFromSession(c.sessionData.sessionString, c.sessionData.apiId || 123456, c.sessionData.apiHash || 'demo');
+                c.client = newClient;
+                const targetEntity = tType === 'hash'
+                  ? await joinPrivateGroup(newClient, tValue, c.phone)
+                  : await joinPublicGroup(newClient, tValue, c.phone);
+                if (targetEntity) c.entity = targetEntity;
+              }
+            } catch (_) {}
+          }
+          console.log(`[Monitor ${sessionId}] 🔄 Reset all accounts, resuming...`);
+          continue;
         }
         
         // Calculate next available time
