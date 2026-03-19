@@ -2373,9 +2373,15 @@ async function runBatchAddJob(job) {
             account = getAvailableAccount();
           }
           if (!account) {
-            member.status = 'failed'; member.error = 'لا يوجد حسابات'; job.failedCount++;
-            addJobLog(job, 'error', `لا يوجد حسابات لـ ${memberLabel}`);
-            memberDone = true; break;
+            // Wait longer and keep retrying instead of failing
+            addJobLog(job, 'warning', `⏳ جميع الحسابات مشغولة - انتظار 60 ثانية...`);
+            await sleep(60000);
+            if (job.stopRequested) { member.status='failed'; member.error='تم الإيقاف'; job.failedCount++; memberDone=true; break; }
+            // Reset flood timers that expired
+            const now2 = Date.now();
+            for (const [k, until] of job.accountFloodUntil) { if (until <= now2) job.accountFloodUntil.delete(k); }
+            account = getAvailableAccount();
+            if (!account) { retries++; continue; } // Keep trying
           }
         }
 
