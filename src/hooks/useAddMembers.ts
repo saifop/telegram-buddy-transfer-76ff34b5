@@ -144,7 +144,7 @@ export function useAddMembers({
     if (jobId && !pollRef.current) {
       setIsRunning(true);
       onOperationStart();
-      lastLogIdxRef.current = 0;
+      lastLogTimeRef.current = 0;
       pollRef.current = setInterval(() => pollStatus(jobId), 2000);
       // Immediate first poll
       pollStatus(jobId);
