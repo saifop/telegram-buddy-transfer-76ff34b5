@@ -2525,7 +2525,7 @@ async function runBatchAddJob(job) {
         }
       }
 
-      if (!memberDone && !job.stopRequested) { member.status='failed'; member.error='استنفذت المحاولات'; job.failedCount++; }
+      if (!memberDone && !job.stopRequested) { member.status='skipped'; member.error='استنفذت المحاولات'; job.skippedCount++; }
       job.processed++;
 
 
