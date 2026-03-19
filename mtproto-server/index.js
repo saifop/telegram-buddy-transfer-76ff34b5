@@ -2141,12 +2141,28 @@ async function handleStartBatchAdd({ accounts, members, targetGroup, sourceGroup
   // Respond immediately
   res.json({ success: true, jobId: id, message: `بدأت العملية: ${members.length} عضو، ${job.totalCycles} دورة` });
 
-  // Run in background
-  runBatchAddJob(job).catch(err => {
-    console.error(`[BatchAdd ${id}] Fatal: ${err.message}`);
-    job.status = 'stopped';
-    job.logs.push({ time: Date.now(), type: 'error', msg: `خطأ: ${err.message}` });
-  });
+  // Run in background with auto-restart on crash
+  const runWithRestart = async () => {
+    let attempts = 0;
+    while (attempts < 100 && !job.stopRequested) {
+      try {
+        await runBatchAddJob(job);
+        break; // Normal completion
+      } catch (err) {
+        attempts++;
+        console.error(`[BatchAdd ${id}] Fatal (attempt ${attempts}): ${err.message}`);
+        job.logs.push({ time: Date.now(), type: 'error', msg: `خطأ: ${err.message} - إعادة المحاولة...` });
+        if (!job.stopRequested) {
+          job.status = 'running';
+          await new Promise(r => setTimeout(r, 10000)); // Wait 10s before restart
+        }
+      }
+    }
+    if (job.status !== 'stopped' && job.status !== 'completed') {
+      job.status = 'completed';
+    }
+  };
+  runWithRestart();
 }
 
 function addJobLog(job, type, msg, phone) {
