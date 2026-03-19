@@ -1342,8 +1342,33 @@ async function handleStartMonitoring({ accounts, addAccounts, groups, sessionId,
     }
 
     if (addClients.length === 0) {
-      monitor.errors.push('فشل اتصال جميع حسابات الإضافة');
-      return;
+      monitor.errors.push('فشل اتصال جميع حسابات الإضافة - إعادة المحاولة بعد 60 ثانية');
+      console.log(`[Monitor ${sessionId}] ❌ All accounts failed to connect, retrying in 60s...`);
+      // Wait and retry connecting instead of giving up
+      while (!monitor.stopRequested && activeMonitors.has(sessionId)) {
+        await new Promise(r => setTimeout(r, 60000));
+        if (monitor.stopRequested) return;
+        for (const acc of allAccounts) {
+          try {
+            const client = await getClientFromSession(acc.sessionString, acc.apiId || 123456, acc.apiHash || 'demo');
+            let targetEntity;
+            try {
+              targetEntity = tType === 'hash'
+                ? await joinPrivateGroup(client, tValue, acc.phone)
+                : await joinPublicGroup(client, tValue, acc.phone);
+            } catch (e) {
+              try { await client.disconnect(); } catch (_) {}
+              continue;
+            }
+            if (!targetEntity) { try { await client.disconnect(); } catch (_) {} continue; }
+            addClients.push({ client, entity: targetEntity, phone: acc.phone, banned: false, floodUntil: 0, addCount: 0, totalAdded: 0, lastResetTime: Date.now(), sessionData: acc });
+            console.log(`[Monitor ${sessionId}] ✅ ${acc.phone} reconnected for auto-add`);
+          } catch (e) {}
+        }
+        if (addClients.length > 0) break;
+        console.log(`[Monitor ${sessionId}] Still no accounts connected, retrying in 60s...`);
+      }
+      if (addClients.length === 0) return; // Only if stopRequested
     }
     
     // Store reference on monitor for status endpoint
@@ -1449,9 +1474,30 @@ async function handleStartMonitoring({ accounts, addAccounts, groups, sessionId,
         const availableAccounts = addClients.filter(c => !c.banned);
         
         if (availableAccounts.length === 0) {
-          console.log(`[Monitor ${sessionId}] ⛔ All ${addClients.length} accounts are permanently banned`);
-          monitor.errors.push('جميع حسابات الإضافة محظورة نهائياً');
-          return;
+          console.log(`[Monitor ${sessionId}] ⛔ All ${addClients.length} accounts banned, waiting for reconnect/cooldown reset...`);
+          monitor.errors.push('جميع الحسابات محظورة - انتظار إعادة المحاولة بعد 30 دقيقة');
+          // Reset all bans after 30 minutes and retry
+          await new Promise(r => setTimeout(r, 30 * 60 * 1000));
+          if (monitor.stopRequested) return;
+          for (const c of addClients) {
+            c.banned = false;
+            c.floodUntil = 0;
+            c.addCount = 0;
+            c.lastResetTime = Date.now();
+            // Reconnect
+            try {
+              if (c.client.disconnected) {
+                const newClient = await getClientFromSession(c.sessionData.sessionString, c.sessionData.apiId || 123456, c.sessionData.apiHash || 'demo');
+                c.client = newClient;
+                const targetEntity = tType === 'hash'
+                  ? await joinPrivateGroup(newClient, tValue, c.phone)
+                  : await joinPublicGroup(newClient, tValue, c.phone);
+                if (targetEntity) c.entity = targetEntity;
+              }
+            } catch (_) {}
+          }
+          console.log(`[Monitor ${sessionId}] 🔄 Reset all accounts, resuming...`);
+          continue;
         }
         
         // Calculate next available time
@@ -2327,9 +2373,15 @@ async function runBatchAddJob(job) {
             account = getAvailableAccount();
           }
           if (!account) {
-            member.status = 'failed'; member.error = 'لا يوجد حسابات'; job.failedCount++;
-            addJobLog(job, 'error', `لا يوجد حسابات لـ ${memberLabel}`);
-            memberDone = true; break;
+            // Wait longer and keep retrying instead of failing
+            addJobLog(job, 'warning', `⏳ جميع الحسابات مشغولة - انتظار 60 ثانية...`);
+            await sleep(60000);
+            if (job.stopRequested) { member.status='failed'; member.error='تم الإيقاف'; job.failedCount++; memberDone=true; break; }
+            // Reset flood timers that expired
+            const now2 = Date.now();
+            for (const [k, until] of job.accountFloodUntil) { if (until <= now2) job.accountFloodUntil.delete(k); }
+            account = getAvailableAccount();
+            if (!account) { retries++; continue; } // Keep trying
           }
         }
 
