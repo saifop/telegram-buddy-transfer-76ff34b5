@@ -1342,8 +1342,33 @@ async function handleStartMonitoring({ accounts, addAccounts, groups, sessionId,
     }
 
     if (addClients.length === 0) {
-      monitor.errors.push('فشل اتصال جميع حسابات الإضافة');
-      return;
+      monitor.errors.push('فشل اتصال جميع حسابات الإضافة - إعادة المحاولة بعد 60 ثانية');
+      console.log(`[Monitor ${sessionId}] ❌ All accounts failed to connect, retrying in 60s...`);
+      // Wait and retry connecting instead of giving up
+      while (!monitor.stopRequested && activeMonitors.has(sessionId)) {
+        await new Promise(r => setTimeout(r, 60000));
+        if (monitor.stopRequested) return;
+        for (const acc of allAccounts) {
+          try {
+            const client = await getClientFromSession(acc.sessionString, acc.apiId || 123456, acc.apiHash || 'demo');
+            let targetEntity;
+            try {
+              targetEntity = tType === 'hash'
+                ? await joinPrivateGroup(client, tValue, acc.phone)
+                : await joinPublicGroup(client, tValue, acc.phone);
+            } catch (e) {
+              try { await client.disconnect(); } catch (_) {}
+              continue;
+            }
+            if (!targetEntity) { try { await client.disconnect(); } catch (_) {} continue; }
+            addClients.push({ client, entity: targetEntity, phone: acc.phone, banned: false, floodUntil: 0, addCount: 0, totalAdded: 0, lastResetTime: Date.now(), sessionData: acc });
+            console.log(`[Monitor ${sessionId}] ✅ ${acc.phone} reconnected for auto-add`);
+          } catch (e) {}
+        }
+        if (addClients.length > 0) break;
+        console.log(`[Monitor ${sessionId}] Still no accounts connected, retrying in 60s...`);
+      }
+      if (addClients.length === 0) return; // Only if stopRequested
     }
     
     // Store reference on monitor for status endpoint
