@@ -2512,7 +2512,8 @@ async function runBatchAddJob(job) {
               if (em.includes('disconnect') || em.includes('connection') || em.includes('TIMEOUT')) {
                 clientPool.delete(accKey); retries++; break;
               }
-              member.status='failed'; member.error=em.substring(0,50); job.failedCount++; addJobLog(job,'error',`❌ ${memberLabel}: ${em.substring(0,50)}`); memberDone=true; break;
+              // Unknown error - skip member, don't stop
+              member.status='skipped'; member.error=em.substring(0,50); job.skippedCount++; addJobLog(job,'warning',`⏭️ ${memberLabel}: ${em.substring(0,50)}`); memberDone=true; break;
             }
           }
           if (addOk) { member.status='added'; job.successCount++; addJobLog(job,'success',`✅ ${memberLabel}`,account.phone); memberDone=true; }
