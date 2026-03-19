@@ -583,15 +583,14 @@ export function useAutoAddMembers({
           let accountRetries = 0;
           const maxAccountRetries = activeAccounts.length;
 
-          while (!memberDone && accountRetries < maxAccountRetries && !abortRef.current) {
+          while (!memberDone && !abortRef.current) {
             const account = getNextAccount(activeAccounts);
             if (!account) {
-              addLog("error", "لا يوجد حسابات متاحة للإضافة");
-              memberDone = true;
-              onUpdateMemberStatus(member.id, "failed", "لا يوجد حسابات متاحة");
-              batchFailed++;
-              statsRef.current.totalFailed++;
-              break;
+              addLog("warning", "⏳ جميع الحسابات مشغولة - انتظار 30 ثانية...");
+              await sleep(30000);
+              if (abortRef.current) break;
+              accountRetries = 0; // Reset retries after waiting
+              continue;
             }
             
             addLog("info", `إضافة: ${memberLabel}`, account.phone);
