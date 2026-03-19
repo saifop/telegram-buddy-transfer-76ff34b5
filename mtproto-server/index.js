@@ -2141,12 +2141,28 @@ async function handleStartBatchAdd({ accounts, members, targetGroup, sourceGroup
   // Respond immediately
   res.json({ success: true, jobId: id, message: `بدأت العملية: ${members.length} عضو، ${job.totalCycles} دورة` });
 
-  // Run in background
-  runBatchAddJob(job).catch(err => {
-    console.error(`[BatchAdd ${id}] Fatal: ${err.message}`);
-    job.status = 'stopped';
-    job.logs.push({ time: Date.now(), type: 'error', msg: `خطأ: ${err.message}` });
-  });
+  // Run in background with auto-restart on crash
+  const runWithRestart = async () => {
+    let attempts = 0;
+    while (attempts < 100 && !job.stopRequested) {
+      try {
+        await runBatchAddJob(job);
+        break; // Normal completion
+      } catch (err) {
+        attempts++;
+        console.error(`[BatchAdd ${id}] Fatal (attempt ${attempts}): ${err.message}`);
+        job.logs.push({ time: Date.now(), type: 'error', msg: `خطأ: ${err.message} - إعادة المحاولة...` });
+        if (!job.stopRequested) {
+          job.status = 'running';
+          await new Promise(r => setTimeout(r, 10000)); // Wait 10s before restart
+        }
+      }
+    }
+    if (job.status !== 'stopped' && job.status !== 'completed') {
+      job.status = 'completed';
+    }
+  };
+  runWithRestart();
 }
 
 function addJobLog(job, type, msg, phone) {
@@ -2496,7 +2512,8 @@ async function runBatchAddJob(job) {
               if (em.includes('disconnect') || em.includes('connection') || em.includes('TIMEOUT')) {
                 clientPool.delete(accKey); retries++; break;
               }
-              member.status='failed'; member.error=em.substring(0,50); job.failedCount++; addJobLog(job,'error',`❌ ${memberLabel}: ${em.substring(0,50)}`); memberDone=true; break;
+              // Unknown error - skip member, don't stop
+              member.status='skipped'; member.error=em.substring(0,50); job.skippedCount++; addJobLog(job,'warning',`⏭️ ${memberLabel}: ${em.substring(0,50)}`); memberDone=true; break;
             }
           }
           if (addOk) { member.status='added'; job.successCount++; addJobLog(job,'success',`✅ ${memberLabel}`,account.phone); memberDone=true; }
@@ -2508,7 +2525,7 @@ async function runBatchAddJob(job) {
         }
       }
 
-      if (!memberDone && !job.stopRequested) { member.status='failed'; member.error='استنفذت المحاولات'; job.failedCount++; }
+      if (!memberDone && !job.stopRequested) { member.status='skipped'; member.error='استنفذت المحاولات'; job.skippedCount++; }
       job.processed++;
 
 
